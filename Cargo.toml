@@ -12,3 +12,8 @@ log = "0.4.11"
 env_logger = "0.7.1"
 anyhow = "1.0.32"
 argh = "0.1.3"
+csv = "1.1.3"
+rayon = "1.4.0"
+smartstring = {version = "0.2.4", features = ["serde"]}
+serde = {version = "1.0.116", features = ["derive"]}
+
