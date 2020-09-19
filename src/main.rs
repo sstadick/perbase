@@ -1,32 +1,38 @@
+extern crate perbase_lib;
 pub mod commands;
 use anyhow::Result;
 use argh::FromArgs;
-use commands::per_base;
+use commands::*;
 use env_logger::Env;
 use log::*;
-use std::path::PathBuf;
 
-/// Calculate the depth at each base, per-base
 #[derive(FromArgs)]
-struct PerBase {
-    /// input BAM/CRAM to analyze
-    #[argh(positional)]
-    reads: PathBuf,
-    /// indexed reference fasta
-    #[argh(option)]
-    ref_fasta: PathBuf,
+/// Commands for generating per-base analysis
+struct Args {
+    #[argh(subcommand)]
+    subcommand: Subcommand,
 }
 
-impl PerBase {
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum Subcommand {
+    SimpleDepth(simple_depth::SimpleDepth),
+    RiskyDepth(risky_depth::RiskyDepth),
+}
+
+impl Subcommand {
     fn run(self) -> Result<()> {
-        per_base::parse(self.reads, self.ref_fasta)?;
+        match self {
+            Subcommand::SimpleDepth(x) => x.run()?,
+            Subcommand::RiskyDepth(x) => x.run()?,
+        }
         Ok(())
     }
 }
 
 fn main() -> Result<()> {
     env_logger::from_env(Env::default().default_filter_or("info")).init();
-    if let Err(err) = argh::from_env::<PerBase>().run() {
+    if let Err(err) = argh::from_env::<Args>().subcommand.run() {
         error!("{}", err);
         std::process::exit(1);
     }
