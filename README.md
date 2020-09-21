@@ -6,6 +6,16 @@ A utility for analyzing metrics at a per-base level.
 
 This includes many small tools optimized for their particular tasks. The goal is to provide fast tools for all per-base level calculations. If a metric is missing, or performance is lacking. Please file a bug/feature issue.
 
+## Instalation
+
+_Coming Soon_
+
+```bash
+conda install -c bioconda perbase
+```
+
+Till then clone the repo and run `cargo build --release`.
+
 ## Tools
 
 ### simple-depth
