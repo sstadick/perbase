@@ -54,6 +54,8 @@ tabix -S 1 -s 1 -b 2 -e 2 ./output.tsv.gz
 tabix output.tsv.gz chr1:5-10
 ```
 
+Runtime-wise this tool should is about 15% slower than `samtools depth` with equivalent flags set.
+
 ## TODOs
 
 - [ ] Paralleleize pileup walk
