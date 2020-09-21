@@ -283,17 +283,27 @@ mod tests {
         let expected = expected_results();
         let mut reader = bam::Reader::from_path(bam).expect("Opened bam for reading");
         let header = reader.header().to_owned();
+        let mut positions = vec![vec![], vec![]];
         for (i, p) in reader.pileup().enumerate() {
             let pileup = p.unwrap();
+            let tid = pileup.tid();
             let pos = Position::from_pileup(pileup, &header);
-            dbg!(&expected[i]);
-            dbg!(&pos);
             assert_eq!(&expected[i].a, &pos.a);
             assert_eq!(&expected[i].c, &pos.c);
             assert_eq!(&expected[i].g, &pos.g);
             assert_eq!(&expected[i].t, &pos.t);
             assert_eq!(&expected[i].n, &pos.n);
             assert_eq!(&expected[i].total, &pos.depth);
+            positions[tid as usize].push(pos);
         }
+
+        // Confirm select Ins / Dels
+        // NB: Using String::new because String is aliased by Smartstring
+        assert_eq!(positions[1][0].ins, 0);
+        assert_eq!(positions[1][1].ins, 1);
+        assert_eq!(positions[1][2].ins, 0);
+        assert_eq!(positions[1][4].del, 0);
+        assert_eq!(positions[1][5].del, 1);
+        assert_eq!(positions[1][6].del, 0);
     }
 }
