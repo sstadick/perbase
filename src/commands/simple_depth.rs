@@ -41,8 +41,6 @@ struct Position {
     ins: usize,
     /// number of deletions at this position
     del: usize,
-    /// number of skips at this position
-    skip: usize,
     /// total depth at this position
     depth: usize,
 }
@@ -58,7 +56,6 @@ impl Position {
             n: 0,
             ins: 0,
             del: 0,
-            skip: 0,
             depth: 0,
         }
     }
@@ -74,16 +71,7 @@ impl Position {
         pos.depth = pileup.depth() as usize;
 
         for alignment in pileup.alignments() {
-            if alignment.is_del() {
-                pos.del += 1;
-                // NB: htslib's reported depth appears to include dels, which bam-readcount and samtools depth do not
-                pos.depth -= 1;
-            } else if alignment.is_refskip() {
-                // TODO: Should skips be counted as del's?
-                // They seem to be already by htslib
-                pos.skip += 1;
-                pos.depth -= 1;
-            } else {
+            if !alignment.is_del() && !alignment.is_refskip() {
                 match (alignment.record().seq()[alignment.qpos().unwrap()] as char)
                     .to_ascii_uppercase()
                 {
@@ -91,15 +79,22 @@ impl Position {
                     'C' => pos.c += 1,
                     'T' => pos.t += 1,
                     'G' => pos.g += 1,
-                    'N' => pos.n += 1,
                     _ => pos.n += 1,
                 }
 
+                // Only report indel starts in the same way a VCF does
                 match alignment.indel() {
-                    bam::pileup::Indel::Ins(_len) => pos.ins += 1,
-                    bam::pileup::Indel::Del(_len) => pos.del += 1,
+                    bam::pileup::Indel::Ins(_len) => {
+                        pos.ins += 1;
+                    }
+                    bam::pileup::Indel::Del(_len) => {
+                        pos.del += 1;
+                    }
                     bam::pileup::Indel::None => (),
                 }
+            } else {
+                // htslib is counting these toward depth. Don't
+                pos.depth -= 1;
             }
         }
         pos
@@ -113,7 +108,7 @@ impl Position {
 pub struct SimpleDepth {
     /// input BAM/CRAM to analyze
     #[argh(positional)]
-    reads: PathBuf,
+    reads: Option<PathBuf>,
 
     /// indexed reference fasta, set if using CRAM
     #[argh(option, short = 'r')]
@@ -152,10 +147,12 @@ impl SimpleDepth {
             .from_writer(raw_writer);
 
         // Set up input reader
-        let mut reader = if self.reads.to_str().unwrap() == "-" {
-            bam::Reader::from_stdin()?
+        let mut reader = if let Some(path) = self.reads {
+            info!("Reading from {:?}", path);
+            bam::Reader::from_path(&path)?
         } else {
-            bam::Reader::from_path(&self.reads)?
+            info!("Reading from STDIN");
+            bam::Reader::from_stdin()?
         };
         if reader_num >= 1 {
             reader.set_threads(reader_num)?;
@@ -216,7 +213,7 @@ mod tests {
 
             // Chr2 - Complex
             // Ins
-            Record::from_sam(&view, b"ONE\t67\tchr2\t1\t40\t2M3I20M\tchr2\t50\t75\tAAGGGAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"ONE\t67\tchr2\t1\t40\t2M2I21M\tchr2\t50\t75\tAAGGGAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // Del
             Record::from_sam(&view, b"TWO\t67\tchr2\t5\t40\t2M5D23M\tchr2\t55\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // Skip
