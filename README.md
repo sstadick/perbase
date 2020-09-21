@@ -1,3 +1,5 @@
+![Publish](https://github.com/sstadick/perbase/workflows/Publish/badge.svg)
+![Rust](https://github.com/sstadick/perbase/workflows/Rust/badge.svg)
 # perbase
 
 A utility for analyzing metrics at a per-base level.
