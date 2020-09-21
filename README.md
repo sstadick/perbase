@@ -13,7 +13,7 @@ The `simple-depth` tool walks over every position in the BAM/CRAM file and calcu
 If you need to filter the reads based on SAM flags, the current method is to use samtools and pipe the output of a `samtools view` command into this tool. EX:
 
 ```bash
-samtools view -hu -F 3588 test/test.bam | perbase simple-bam
+samtools view -hu -F 3844 test/test.bam | perbase simple-bam
 ```
 
 The same method can be used to filter by region.
