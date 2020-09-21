@@ -17,14 +17,12 @@ struct Args {
 #[argh(subcommand)]
 enum Subcommand {
     SimpleDepth(simple_depth::SimpleDepth),
-    RiskyDepth(risky_depth::RiskyDepth),
 }
 
 impl Subcommand {
     fn run(self) -> Result<()> {
         match self {
             Subcommand::SimpleDepth(x) => x.run()?,
-            Subcommand::RiskyDepth(x) => x.run()?,
         }
         Ok(())
     }

@@ -37,8 +37,6 @@ struct Position {
     /// number of N bases at this position
     #[serde(alias = "N")]
     n: usize,
-    /// any base not covered above
-    other_base: usize,
     /// number of insertions at this position
     ins: usize,
     /// number of deletions at this position
@@ -58,12 +56,53 @@ impl Position {
             t: 0,
             g: 0,
             n: 0,
-            other_base: 0,
             ins: 0,
             del: 0,
             skip: 0,
             depth: 0,
         }
+    }
+
+    /// Convert a pileup into a `Position`.
+    ///
+    /// This will walk over each of the alignments and count the number each nucleotide it finds.
+    /// It will also count the number of Ins/Dels that are at each position. The output of this 1-based.
+    fn from_pileup(pileup: bam::pileup::Pileup, header: &bam::HeaderView) -> Self {
+        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
+        // make output 1-based
+        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        pos.depth = pileup.depth() as usize;
+
+        for alignment in pileup.alignments() {
+            if alignment.is_del() {
+                pos.del += 1;
+                // NB: htslib's reported depth appears to include dels, which bam-readcount and samtools depth do not
+                pos.depth -= 1;
+            } else if alignment.is_refskip() {
+                // TODO: Should skips be counted as del's?
+                // They seem to be already by htslib
+                pos.skip += 1;
+                pos.depth -= 1;
+            } else {
+                match (alignment.record().seq()[alignment.qpos().unwrap()] as char)
+                    .to_ascii_uppercase()
+                {
+                    'A' => pos.a += 1,
+                    'C' => pos.c += 1,
+                    'T' => pos.t += 1,
+                    'G' => pos.g += 1,
+                    'N' => pos.n += 1,
+                    _ => pos.n += 1,
+                }
+
+                match alignment.indel() {
+                    bam::pileup::Indel::Ins(_len) => pos.ins += 1,
+                    bam::pileup::Indel::Del(_len) => pos.del += 1,
+                    bam::pileup::Indel::None => (),
+                }
+            }
+        }
+        pos
     }
 }
 
@@ -76,7 +115,7 @@ pub struct SimpleDepth {
     #[argh(positional)]
     reads: PathBuf,
 
-    /// indexed reference simplea, set if using CRAM
+    /// indexed reference fasta, set if using CRAM
     #[argh(option, short = 'r')]
     ref_fasta: Option<PathBuf>,
 
@@ -121,49 +160,143 @@ impl SimpleDepth {
         if reader_num >= 1 {
             reader.set_threads(reader_num)?;
         }
-        // If passed add ref_simplea
+        // If passed add ref_fasta
         if let Some(ref_fasta) = self.ref_fasta {
             reader.set_reference(ref_fasta)?;
         }
         // Get a copy of the header
-        let header = bam::HeaderView::from_header(&bam::Header::from_template(reader.header()));
+        let header = reader.header().to_owned();
 
         // Walk over pileups
         for p in reader.pileup() {
             let pileup = p?;
-            let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
-            // make output 1-based
-            let mut pos = Position::new(String::from(name), (pileup.pos() + 1) as usize);
-            pos.depth = pileup.depth() as usize;
-
-            for alignment in pileup.alignments() {
-                if alignment.is_del() {
-                    pos.del += 1;
-                } else if alignment.is_refskip() {
-                    // TODO: Should skips be counted as del's?
-                    // pos.skip += 1;
-                } else {
-                    match (alignment.record().seq()[alignment.qpos().unwrap()] as char)
-                        .to_ascii_uppercase()
-                    {
-                        'A' => pos.a += 1,
-                        'C' => pos.c += 1,
-                        'T' => pos.t += 1,
-                        'G' => pos.g += 1,
-                        'N' => pos.n += 1,
-                        _ => pos.other_base += 1,
-                    }
-
-                    match alignment.indel() {
-                        bam::pileup::Indel::Ins(_len) => pos.ins += 1,
-                        bam::pileup::Indel::Del(_len) => pos.del += 1,
-                        bam::pileup::Indel::None => (),
-                    }
-                }
-            }
+            let pos = Position::from_pileup(pileup, &header);
             writer.serialize(pos)?;
         }
         writer.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use csv::ReaderBuilder;
+    use rust_htslib::{bam, bam::record::Record};
+    use serde::Deserialize;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn generate_data(path: &PathBuf) {
+        // Build a header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        let mut chr2 = bam::header::HeaderRecord::new(b"SQ");
+        chr2.push_tag(b"SN", &"chr2".to_owned());
+        chr2.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        header.push_record(&chr2);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Add records
+        let records = vec![
+            // Chr1 - Nice
+            Record::from_sam(&view, b"ONE\t67\tchr1\t1\t40\t25M\tchr1\t50\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO\t67\tchr1\t5\t40\t25M\tchr1\t55\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE\t67\tchr1\t10\t40\t25M\tchr1\t60\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR\t67\tchr1\t15\t40\t25M\tchr1\t65\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t67\tchr1\t20\t40\t25M\tchr1\t70\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"ONE_2\t147\tchr1\t50\t40\t25M\tchr1\t1\t75\tTTTTTTTTTTTTTTTTTTTTTTTTT\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO_2\t147\tchr1\t55\t40\t25M\tchr1\t5\t75\tGGGGGGGGGGGGGGGGGGGGGGGGG\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE_2\t147\tchr1\t60\t40\t25M\tchr1\t10\t75\tCCCCCCCCCCCCCCCCCCCCCCCCC\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR_2\t147\tchr1\t65\t40\t25M\tchr1\t15\t75\tNNNNNNNNNNNNNNNNNNNNNNNNN\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE_2\t147\tchr1\t70\t40\t25M\tchr1\t20\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
+            // Chr2 - Complex
+            // Ins
+            Record::from_sam(&view, b"ONE\t67\tchr2\t1\t40\t2M3I20M\tchr2\t50\t75\tAAGGGAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Del
+            Record::from_sam(&view, b"TWO\t67\tchr2\t5\t40\t2M5D23M\tchr2\t55\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Skip
+            Record::from_sam(&view, b"THREE\t67\tchr2\t10\t40\t3M5N22M\tchr2\t60\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Mismatch
+            Record::from_sam(&view, b"FOUR\t67\tchr2\t15\t40\t25M\tchr2\t65\t75\tATAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Overlapping mates
+            Record::from_sam(&view, b"FIVE\t67\tchr2\t20\t40\t25M\tchr2\t35\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE_2\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
+            // Other base
+            Record::from_sam(&view, b"ONE_2\t147\tchr2\t50\t40\t25M\tchr2\t1\t75\tAAAAAAAAAAAAAAAAAAAAAYAAA\t#########################").unwrap(),
+
+            Record::from_sam(&view, b"TWO_2\t147\tchr2\t55\t40\t25M\tchr2\t5\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE_2\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR_2\t147\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+        ];
+
+        let mut writer =
+            bam::Writer::from_path(path, &header, bam::Format::BAM).expect("Created writer");
+        // Keep the `test/test.bam` up to date
+        let mut test_writer = bam::Writer::from_path("test/test.bam", &header, bam::Format::BAM)
+            .expect("Created writer");
+        for record in records.iter() {
+            writer.write(record).expect("Wrote record");
+            test_writer.write(record).expect("Wrote to test dir");
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Expected {
+        chr: String,
+        pos: usize,
+        #[serde(alias = "A")]
+        a: usize,
+        #[serde(alias = "C")]
+        c: usize,
+        #[serde(alias = "T")]
+        t: usize,
+        #[serde(alias = "G")]
+        g: usize,
+        #[serde(alias = "N")]
+        n: usize,
+        total: usize,
+    }
+
+    /// Expected results for the test data based on bam-readcounts
+    fn expected_results() -> Vec<Expected> {
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(true)
+            .from_path("./test/expected.tsv")
+            .unwrap();
+        let mut results = vec![];
+        for record in reader.deserialize() {
+            let record: Expected = record.unwrap();
+            results.push(record);
+        }
+        results
+    }
+
+    #[test]
+    fn sanity() {
+        let tmp = tempdir().expect("Made tempdir");
+        let bam = tmp.path().join("test.bam");
+        generate_data(&bam);
+        let expected = expected_results();
+        let mut reader = bam::Reader::from_path(bam).expect("Opened bam for reading");
+        let header = reader.header().to_owned();
+        for (i, p) in reader.pileup().enumerate() {
+            let pileup = p.unwrap();
+            let pos = Position::from_pileup(pileup, &header);
+            dbg!(&expected[i]);
+            dbg!(&pos);
+            assert_eq!(&expected[i].a, &pos.a);
+            assert_eq!(&expected[i].c, &pos.c);
+            assert_eq!(&expected[i].g, &pos.g);
+            assert_eq!(&expected[i].t, &pos.t);
+            assert_eq!(&expected[i].n, &pos.n);
+            assert_eq!(&expected[i].total, &pos.depth);
+        }
     }
 }
