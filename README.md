@@ -50,6 +50,7 @@ tabix output.tsv.gz chr1:5-10
 - [ ] Add more metrics to match `bam-readcount` as a `comprehensive` tool
 - [ ] Add a strictly depth calculation a la `mosdepth`
 - [ ] Explore other BAM/CRAM parsers that have a tidier API
+- [ ] Add bgzip output / auto tabix indexing support
 
 ## Tests
 
