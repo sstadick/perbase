@@ -1,6 +1,8 @@
-/// Simple single pass over bam file to calculate depth at each position
-/// as well as depth per nucleotide. Additionally counts the number of
-/// insertions / deletions at each position.
+//! # Simple Depth
+//!
+//! Simple single pass over bam file to calculate depth at each position
+//! as well as depth per nucleotide. Additionally counts the number of
+//! insertions / deletions at each position.
 use anyhow::Result;
 use argh::FromArgs;
 use grep_cli::stdout;
@@ -10,60 +12,72 @@ use rust_htslib::{bam, bam::Read};
 use serde::Serialize;
 use smartstring::alias::String;
 use std::{
+    default,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
 };
 use termcolor::ColorChoice;
 
-#[derive(Debug, Serialize)]
+/// Hold all information about a position.
+#[derive(Debug, Serialize, Default)]
 struct Position {
-    /// contig name
-    chr: String,
-    /// 1-based position
+    /// Reference sequence name.
+    #[serde(alias = "REF")]
+    ref_seq: String,
+    /// 1-based position in the sequence.
+    #[serde(alias = "POS")]
     pos: usize,
-    /// number of A bases at this position
+    /// Total depth at this position.
+    #[serde(alias = "DEPTH")]
+    depth: usize,
+    /// Number of A bases at this position.
     #[serde(alias = "A")]
     a: usize,
-    /// number of C bases at this position
+    /// Number of C bases at this position.
     #[serde(alias = "C")]
     c: usize,
-    /// number of T bases at this position
-    #[serde(alias = "T")]
-    t: usize,
-    /// number of G bases at this position
+    /// Number of G bases at this position.
     #[serde(alias = "G")]
     g: usize,
-    /// number of N bases at this position
+    /// Number of T bases at this position.
+    #[serde(alias = "T")]
+    t: usize,
+    /// Number of N bases at this position. Any unrecognized base will be counted as an N.
     #[serde(alias = "N")]
     n: usize,
-    /// number of insertions at this position
+    /// Number of insertions that start to the right of this position.
+    /// Does not count toward depth.
+    #[serde(alias = "INS")]
     ins: usize,
-    /// number of deletions at this position
+    /// Number of deletions at this position.
+    #[serde(alias = "DEL")]
     del: usize,
-    /// total depth at this position
-    depth: usize,
+    /// Number of refskips at this position. Does count toward depth.
+    #[serde(alias = "REF_SKIP")]
+    ref_skip: usize,
 }
 impl Position {
-    fn new(chr: String, pos: usize) -> Self {
+    /// Create a new position for the given ref_seq name.
+    fn new(ref_seq: String, pos: usize) -> Self {
         Position {
-            chr,
+            ref_seq,
             pos,
-            a: 0,
-            c: 0,
-            t: 0,
-            g: 0,
-            n: 0,
-            ins: 0,
-            del: 0,
-            depth: 0,
+            ..default::Default::default()
         }
     }
 
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels that are at each position. The output of this 1-based.
+    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    ///
+    /// Reference base
+    /// Average base quality
+    /// Average map quality
+    /// Average dist to ends
+    /// A calculated error rate based on mismatches?
+    /// Optionally display read names at the position?
     fn from_pileup(pileup: bam::pileup::Pileup, header: &bam::HeaderView) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
@@ -71,7 +85,14 @@ impl Position {
         pos.depth = pileup.depth() as usize;
 
         for alignment in pileup.alignments() {
-            if !alignment.is_del() && !alignment.is_refskip() {
+            // NB: Order matters here, a refskip is true for both is_del and is_refskip
+            // while a true del is only true for is_del
+            if alignment.is_refskip() {
+                pos.ref_skip += 1
+            } else if alignment.is_del() {
+                pos.del += 1
+            } else {
+                // We have an actual base!
                 match (alignment.record().seq()[alignment.qpos().unwrap()] as char)
                     .to_ascii_uppercase()
                 {
@@ -81,20 +102,13 @@ impl Position {
                     'G' => pos.g += 1,
                     _ => pos.n += 1,
                 }
-
-                // Only report indel starts in the same way a VCF does
+                // Check for insertions
                 match alignment.indel() {
                     bam::pileup::Indel::Ins(_len) => {
                         pos.ins += 1;
                     }
-                    bam::pileup::Indel::Del(_len) => {
-                        pos.del += 1;
-                    }
-                    bam::pileup::Indel::None => (),
+                    _ => (),
                 }
-            } else {
-                // htslib is counting these toward depth. Don't
-                pos.depth -= 1;
             }
         }
         pos
@@ -124,6 +138,12 @@ pub struct SimpleDepth {
 }
 
 impl SimpleDepth {
+    // TODO: Add special handling when the bam is indexed and read it multi-threaded mode, fetching on chr at a time
+    // TODO: Allow specifying a region, multithreaded over regions
+    // TODO: Add sam flag support as found here: https://github.com/rust-bio/rust-bio-tools/blob/master/src/bam/depth.rs
+    // TODO: Add mate detection like sambamba
+    // TODO: Update README and add a table explaining the output and options
+    // TODO: Add a cached MD tag parser to rust_htslib
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
 
@@ -178,13 +198,14 @@ impl SimpleDepth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use csv::ReaderBuilder;
+    use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
-    use serde::Deserialize;
     use std::path::PathBuf;
-    use tempfile::tempdir;
 
-    fn generate_data(path: &PathBuf) {
+    #[fixture]
+    fn positions() -> Vec<Vec<Position>> {
+        // This keep the test bam up to date
+        let path = PathBuf::from("test/test.bam");
         // Build a header
         let mut header = bam::header::Header::new();
         let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
@@ -232,78 +253,99 @@ mod tests {
             Record::from_sam(&view, b"FOUR_2\t147\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
         ];
 
+        // Update the test/test.bam file
         let mut writer =
-            bam::Writer::from_path(path, &header, bam::Format::BAM).expect("Created writer");
-        // Keep the `test/test.bam` up to date
-        let mut test_writer = bam::Writer::from_path("test/test.bam", &header, bam::Format::BAM)
-            .expect("Created writer");
+            bam::Writer::from_path(&path, &header, bam::Format::BAM).expect("Created writer");
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
-            test_writer.write(record).expect("Wrote to test dir");
         }
-    }
+        drop(writer); // Drop writer so filehandle closes
 
-    #[derive(Debug, Deserialize)]
-    struct Expected {
-        chr: String,
-        pos: usize,
-        #[serde(alias = "A")]
-        a: usize,
-        #[serde(alias = "C")]
-        c: usize,
-        #[serde(alias = "T")]
-        t: usize,
-        #[serde(alias = "G")]
-        g: usize,
-        #[serde(alias = "N")]
-        n: usize,
-        total: usize,
-    }
-
-    /// Expected results for the test data based on bam-readcounts
-    fn expected_results() -> Vec<Expected> {
-        let mut reader = ReaderBuilder::new()
-            .delimiter(b'\t')
-            .has_headers(true)
-            .from_path("./test/expected.tsv")
-            .unwrap();
-        let mut results = vec![];
-        for record in reader.deserialize() {
-            let record: Expected = record.unwrap();
-            results.push(record);
-        }
-        results
-    }
-
-    #[test]
-    fn sanity() {
-        let tmp = tempdir().expect("Made tempdir");
-        let bam = tmp.path().join("test.bam");
-        generate_data(&bam);
-        let expected = expected_results();
-        let mut reader = bam::Reader::from_path(bam).expect("Opened bam for reading");
+        // Extract bam into Positions
+        let mut reader = bam::Reader::from_path(&path).expect("Opened bam for reading");
         let header = reader.header().to_owned();
         let mut positions = vec![vec![], vec![]];
-        for (i, p) in reader.pileup().enumerate() {
+        for p in reader.pileup() {
             let pileup = p.unwrap();
             let tid = pileup.tid();
             let pos = Position::from_pileup(pileup, &header);
-            assert_eq!(&expected[i].a, &pos.a);
-            assert_eq!(&expected[i].c, &pos.c);
-            assert_eq!(&expected[i].g, &pos.g);
-            assert_eq!(&expected[i].t, &pos.t);
-            assert_eq!(&expected[i].n, &pos.n);
-            assert_eq!(&expected[i].total, &pos.depth);
             positions[tid as usize].push(pos);
         }
+        positions
+    }
 
-        // Confirm select Ins / Dels
-        // NB: Using String::new because String is aliased by Smartstring
+    #[rstest]
+    fn check_insertions(positions: Vec<Vec<Position>>) {
         assert_eq!(positions[1][0].ins, 0);
         assert_eq!(positions[1][1].ins, 1);
         assert_eq!(positions[1][2].ins, 0);
-        assert_eq!(positions[1][4].del, 0);
-        assert_eq!(positions[1][5].del, 1);
-        assert_eq!(positions[1][6].del, 0);
+    }
+
+    #[rstest]
+    fn check_deletions(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][5].del, 0);
+        assert_eq!(positions[1][6].del, 1);
+        assert_eq!(positions[1][7].del, 1);
+        assert_eq!(positions[1][8].del, 1);
+        assert_eq!(positions[1][9].del, 1);
+        assert_eq!(positions[1][10].del, 1);
+        assert_eq!(positions[1][11].del, 0);
+    }
+
+    #[rstest]
+    fn check_refskips(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][11].ref_skip, 0);
+        assert_eq!(positions[1][12].ref_skip, 1);
+        assert_eq!(positions[1][13].ref_skip, 1);
+        assert_eq!(positions[1][14].ref_skip, 1);
+        assert_eq!(positions[1][15].ref_skip, 1);
+        assert_eq!(positions[1][16].ref_skip, 1);
+        assert_eq!(positions[1][17].ref_skip, 0);
+    }
+
+    #[rstest]
+    // TODO: Make mate aware
+    fn check_depths(positions: Vec<Vec<Position>>) {
+        dbg!(&positions[0]);
+        assert_eq!(positions[0][0].depth, 1);
+        assert_eq!(positions[0][4].depth, 2);
+        assert_eq!(positions[0][9].depth, 3);
+        assert_eq!(positions[0][14].depth, 4);
+        assert_eq!(positions[0][19].depth, 5);
+        assert_eq!(positions[0][25].depth, 4);
+        assert_eq!(positions[0][29].depth, 3);
+        assert_eq!(positions[0][34].depth, 2);
+        assert_eq!(positions[0][39].depth, 1);
+        // NB: -6 bc there are 6 positions with no coverage from 44-50
+        assert_eq!(positions[0][78 - 6].depth, 4);
+    }
+
+    #[rstest]
+    fn check_depths_insertions(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][0].depth, 1);
+        assert_eq!(positions[1][1].depth, 1); // Insertion is here
+        assert_eq!(positions[1][2].depth, 1);
+    }
+
+    #[rstest]
+    fn check_depths_deletions(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][5].depth, 2);
+        assert_eq!(positions[1][6].depth, 2); // Del
+        assert_eq!(positions[1][7].depth, 2); // Del
+        assert_eq!(positions[1][8].depth, 2); // Del
+        assert_eq!(positions[1][9].depth, 3); // Del
+        assert_eq!(positions[1][10].depth, 3); // Del
+        assert_eq!(positions[1][11].depth, 3);
+    }
+
+    #[rstest]
+    fn check_depths_refskips(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][11].depth, 3);
+        assert_eq!(positions[1][12].depth, 3); // Skip
+        assert_eq!(positions[1][13].depth, 3); // Skip
+        assert_eq!(positions[1][14].depth, 4); // Skip
+        assert_eq!(positions[1][15].depth, 4); // Skip
+        assert_eq!(positions[1][16].depth, 4);
+        assert_eq!(positions[1][17].depth, 4);
     }
 }
