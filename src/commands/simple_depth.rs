@@ -161,8 +161,6 @@ pub struct SimpleDepth {
 impl SimpleDepth {
     // TODO: Allow specifying a region / bed file, multithreaded over regions
     // TODO: Add mate detection like sambamba
-    // TODO: Update README and add a table explaining the output and options
-    // TODO: Add a cached MD tag parser to rust_htslib
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
 
@@ -208,7 +206,7 @@ impl SimpleDepth {
                 let mut result = vec![];
                 for chunk_start in (0..end).step_by(serial_step as usize) {
                     info!(
-                        "In serial step of {}:{}-{}",
+                        "Processing super region: {}:{}-{}",
                         tid,
                         chunk_start,
                         chunk_start + serial_step
@@ -233,6 +231,10 @@ impl SimpleDepth {
                     );
                     result = r;
                 }
+                // Print out the last set of results sitting in the array
+                result
+                    .into_iter()
+                    .for_each(|pos: Position| snd.send(pos).unwrap());
             }
         });
         rxv.into_iter()
@@ -243,7 +245,7 @@ impl SimpleDepth {
 
     /// Process a given region, calculating depths
     fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Position> {
-        info!("Fetching {}:{}-{}", tid, start, stop);
+        info!("Processing region {}:{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
