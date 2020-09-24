@@ -125,8 +125,7 @@ impl Position {
     }
 }
 
-/// Calculate the depth at each base, per-base. Use samtools to prefilter
-/// and pipe into this command.
+/// Calculate the depth at each base, per-base.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "simple-depth")]
 pub struct SimpleDepth {
@@ -160,7 +159,7 @@ pub struct SimpleDepth {
 }
 
 impl SimpleDepth {
-    // TODO: Allow specifying a region, multithreaded over regions
+    // TODO: Allow specifying a region / bed file, multithreaded over regions
     // TODO: Add mate detection like sambamba
     // TODO: Update README and add a table explaining the output and options
     // TODO: Add a cached MD tag parser to rust_htslib
