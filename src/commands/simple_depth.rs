@@ -5,12 +5,15 @@
 //! insertions / deletions at each position.
 use anyhow::Result;
 use argh::FromArgs;
+use crossbeam_channel::unbounded;
 use grep_cli::stdout;
 use log::*;
 use perbase_lib::utils;
+use rayon::prelude::*;
 use rust_htslib::{bam, bam::Read};
 use serde::Serialize;
 use smartstring::alias::String;
+use std::thread;
 use std::{
     default,
     fs::File,
@@ -71,6 +74,7 @@ impl Position {
     /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
     /// * `filter_fn` - a function to filter out reads, returning false will cause a read to be filtered
     // TODOs:
+    // Write my own pilelup engine
     // Reference base
     // Average base quality
     // Average map quality
@@ -126,9 +130,9 @@ impl Position {
 #[derive(FromArgs)]
 #[argh(subcommand, name = "simple-depth")]
 pub struct SimpleDepth {
-    /// input BAM/CRAM to analyze
+    /// input BAM/CRAM to analyze, must be indexed
     #[argh(positional)]
-    reads: Option<PathBuf>,
+    reads: PathBuf,
 
     /// indexed reference fasta, set if using CRAM
     #[argh(option, short = 'r')]
@@ -165,12 +169,8 @@ impl SimpleDepth {
         info!("Running simple-depth on: {:?}", self.reads);
 
         let cpus = utils::determine_allowed_cpus(self.threads)?;
-        let reader_num = if cpus > 1 {
-            std::cmp::min(cpus - 1, 4)
-        } else {
-            0
-        };
-        info!("Using threads: {}", reader_num + 1);
+        let half_cpus = std::cmp::max(cpus / 2, 1);
+        utils::set_rayon_global_pools_size(half_cpus)?;
 
         // Set up output writer
         let raw_writer: Box<dyn Write> = match &self.output {
@@ -184,36 +184,92 @@ impl SimpleDepth {
             .from_writer(raw_writer);
 
         // Set up input reader
-        let mut reader = if let Some(path) = &self.reads {
-            info!("Reading from {:?}", path);
-            bam::Reader::from_path(&path)?
-        } else {
-            info!("Reading from STDIN");
-            bam::Reader::from_stdin()?
-        };
-        if reader_num >= 1 {
-            reader.set_threads(reader_num)?;
-        }
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta)?;
-        }
-        // Get a copy of the header
-        let header = reader.header().to_owned();
+        let (snd, rxv) = unbounded();
+        thread::spawn(move || {
+            info!("Reading from {:?}", &self.reads);
+            let mut reader = bam::IndexedReader::from_path(&self.reads).expect("Indexed BAM/CRAM");
+            // If passed add ref_fasta
+            if let Some(ref_fasta) = &self.ref_fasta {
+                reader.set_reference(ref_fasta).expect("Set ref");
+            }
+            // Get a copy of the header
+            let header = reader.header().to_owned();
 
-        // Walk over pileups
-        for p in reader.pileup() {
-            let pileup = p?;
-            let pos = Position::from_pileup(pileup, &header, |record| {
-                let flags = record.flags();
-                (!flags) & &self.include_flags == 0
-                    && flags & &self.exclude_flags == 0
-                    && &record.mapq() >= &self.min_mapq
-            });
-            writer.serialize(pos)?;
-        }
+            for tid in 0..header.target_count() {
+                let end = header.target_len(tid).unwrap();
+                let serial_step: u64 = std::cmp::min(1_000_000 * half_cpus as u64, end);
+                let par_step: u64 = std::cmp::min(1_000_000, end);
+                info!("Serial step of {} for {}", serial_step, tid);
+                info!("Parallel step of {} for {}", par_step, tid);
+
+                // Two step chunking
+                // NB: result holds onto the processed records and sends them to the printer,
+                // so at any given time a chunk of `serial_step` is is being processed and
+                // printed at the same time
+                let mut result = vec![];
+                for chunk_start in (0..end).step_by(serial_step as usize) {
+                    info!(
+                        "In serial step of {}:{}-{}",
+                        tid,
+                        chunk_start,
+                        chunk_start + serial_step
+                    );
+                    let (r, _): (Vec<Position>, ()) = rayon::join(
+                        || {
+                            // NB: need to create vec of starts because step_by can't go into par_iter and
+                            // par_bridge appears to not preserve the order
+                            let starts: Vec<u64> = (chunk_start..chunk_start + serial_step)
+                                .step_by(par_step as usize)
+                                .collect();
+                            starts
+                                .into_par_iter()
+                                .flat_map(|start| self.process_region(tid, start, start + par_step))
+                                .collect()
+                        },
+                        || {
+                            result
+                                .into_iter()
+                                .for_each(|pos: Position| snd.send(pos).unwrap())
+                        },
+                    );
+                    result = r;
+                }
+            }
+        });
+        rxv.into_iter()
+            .for_each(|pos| writer.serialize(pos).unwrap());
         writer.flush()?;
         Ok(())
+    }
+
+    /// Process a given region, calculating depths
+    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Position> {
+        info!("Fetching {}:{}-{}", tid, start, stop);
+        // Create a reader
+        let mut reader =
+            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+        reader.set_threads(1).expect("Setting threads");
+        let header = reader.header().to_owned();
+        reader.fetch(tid, start, stop).expect("Fetched a region");
+        // Walk over pileups
+        let result: Vec<Position> = reader
+            .pileup()
+            .flat_map(|p| {
+                let pileup = p.expect("Extracted a pileup");
+                // Verify that we are within the bounds of the chunk we are iterating on
+                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
+                    Some(Position::from_pileup(pileup, &header, |record| {
+                        let flags = record.flags();
+                        (!flags) & &self.include_flags == 0
+                            && flags & &self.exclude_flags == 0
+                            && &record.mapq() >= &self.min_mapq
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        result
     }
 }
 

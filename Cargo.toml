@@ -26,6 +26,8 @@ serde = {version = "1.0.116", features = ["derive"]}
 num_cpus = "1.13.0"
 grep-cli = "0.1.5"
 termcolor = "1.1.0"
+crossbeam = "0.7.3"
+crossbeam-channel = "0.4.4"
 
 [dev-dependencies]
 rstest = "0.6.4"
