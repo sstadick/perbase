@@ -18,6 +18,8 @@ conda install -c bioconda perbase
 
 The `simple-depth` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
 
+The output columns are as follows:
+
 | Column   | Description                                                                                        |
 | -------- | -------------------------------------------------------------------------------------------------- |
 | REF      | The reference sequence name                                                                        |
@@ -32,8 +34,6 @@ The `simple-depth` tool walks over every position in the BAM/CRAM file and calcu
 | DEL      | Total deletions covering this position                                                             |
 | REF_SKIP | Total reference skip operations covering this position                                             |
 | FAIL     | Total reads failing filters that covered this position (their bases were not counted toward depth) |
-
-The output is 1-based.
 
 ```bash
 perbase simple-depth ./test/test.bam
@@ -69,6 +69,28 @@ perbase simple-depth ./test/test.bam | bgzip > output.tsv.gz
 tabix -S 1 -s 1 -b 2 -e 2 ./output.tsv.gz
 # Query all positions overlapping region
 tabix output.tsv.gz chr1:5-10
+```
+
+Usage:
+
+```bash
+Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-o <output>] [-t <threads>] [-f <include-flags>] [-F <exclude-flags>] [-q <min-mapq>]
+
+Calculate the depth at each base, per-nucleotide.
+
+Arguments:
+  reads             indexed BAM/CRAM file
+
+Options:
+  -r, --ref-fasta   indexed reference fasta, set if using CRAM
+  -o, --output      output path, defaults to stdout
+  -t, --threads     the number of threads to use
+  -f, --include-flags
+                    SAM flags to include
+  -F, --exclude-flags
+                    SAM flags to exclude
+  -q, --min-mapq    minimum mapq for a read to count toward depth
+  --help            display usage information
 ```
 
 ## TODOs
