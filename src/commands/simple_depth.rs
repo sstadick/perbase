@@ -21,40 +21,33 @@ use termcolor::ColorChoice;
 
 /// Hold all information about a position.
 #[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 struct Position {
     /// Reference sequence name.
-    #[serde(alias = "REF")]
+    #[serde(rename = "REF")]
     ref_seq: String,
     /// 1-based position in the sequence.
-    #[serde(alias = "POS")]
     pos: usize,
     /// Total depth at this position.
-    #[serde(alias = "DEPTH")]
     depth: usize,
     /// Number of A bases at this position.
-    #[serde(alias = "A")]
     a: usize,
     /// Number of C bases at this position.
-    #[serde(alias = "C")]
     c: usize,
     /// Number of G bases at this position.
-    #[serde(alias = "G")]
     g: usize,
     /// Number of T bases at this position.
-    #[serde(alias = "T")]
     t: usize,
     /// Number of N bases at this position. Any unrecognized base will be counted as an N.
-    #[serde(alias = "N")]
     n: usize,
     /// Number of insertions that start to the right of this position.
     /// Does not count toward depth.
-    #[serde(alias = "INS")]
     ins: usize,
     /// Number of deletions at this position.
-    #[serde(alias = "DEL")]
     del: usize,
+    /// Number of reads failing filters at this position.
+    fail: usize,
     /// Number of refskips at this position. Does count toward depth.
-    #[serde(alias = "REF_SKIP")]
     ref_skip: usize,
 }
 impl Position {
@@ -72,19 +65,34 @@ impl Position {
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
     /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
     ///
-    /// Reference base
-    /// Average base quality
-    /// Average map quality
-    /// Average dist to ends
-    /// A calculated error rate based on mismatches?
-    /// Optionally display read names at the position?
-    fn from_pileup(pileup: bam::pileup::Pileup, header: &bam::HeaderView) -> Self {
+    /// # Arguments
+    ///
+    /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
+    /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
+    /// * `filter_fn` - a function to filter out reads, returning false will cause a read to be filtered
+    // TODOs:
+    // Reference base
+    // Average base quality
+    // Average map quality
+    // Average dist to ends
+    // A calculated error rate based on mismatches?
+    // Optionally display read names at the position?
+    fn from_pileup<F>(pileup: bam::pileup::Pileup, header: &bam::HeaderView, filter_fn: F) -> Self
+    where
+        F: Fn(&bam::record::Record) -> bool,
+    {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
         let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
         pos.depth = pileup.depth() as usize;
 
         for alignment in pileup.alignments() {
+            let record = alignment.record();
+            if !filter_fn(&record) {
+                pos.depth -= 1;
+                pos.fail += 1;
+                continue;
+            }
             // NB: Order matters here, a refskip is true for both is_del and is_refskip
             // while a true del is only true for is_del
             if alignment.is_refskip() {
@@ -93,9 +101,7 @@ impl Position {
                 pos.del += 1
             } else {
                 // We have an actual base!
-                match (alignment.record().seq()[alignment.qpos().unwrap()] as char)
-                    .to_ascii_uppercase()
-                {
+                match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
                     'A' => pos.a += 1,
                     'C' => pos.c += 1,
                     'T' => pos.t += 1,
@@ -135,12 +141,23 @@ pub struct SimpleDepth {
     /// the number of threads to use
     #[argh(option, short = 't', default = "num_cpus::get()")]
     threads: usize,
+
+    /// SAM flags to include
+    #[argh(option, short = 'f', default = "0")]
+    include_flags: u16,
+
+    /// SAM flags to exclude
+    #[argh(option, short = 'F', default = "3848")]
+    exclude_flags: u16,
+
+    /// minimum mapq for a read to count toward depth
+    #[argh(option, short = 'q', default = "0")]
+    min_mapq: u8,
 }
 
 impl SimpleDepth {
     // TODO: Add special handling when the bam is indexed and read it multi-threaded mode, fetching on chr at a time
     // TODO: Allow specifying a region, multithreaded over regions
-    // TODO: Add sam flag support as found here: https://github.com/rust-bio/rust-bio-tools/blob/master/src/bam/depth.rs
     // TODO: Add mate detection like sambamba
     // TODO: Update README and add a table explaining the output and options
     // TODO: Add a cached MD tag parser to rust_htslib
@@ -156,7 +173,7 @@ impl SimpleDepth {
         info!("Using threads: {}", reader_num + 1);
 
         // Set up output writer
-        let raw_writer: Box<dyn Write> = match self.output {
+        let raw_writer: Box<dyn Write> = match &self.output {
             Some(path) if path.to_str().unwrap() != "-" => {
                 Box::new(BufWriter::new(File::open(path)?))
             }
@@ -167,7 +184,7 @@ impl SimpleDepth {
             .from_writer(raw_writer);
 
         // Set up input reader
-        let mut reader = if let Some(path) = self.reads {
+        let mut reader = if let Some(path) = &self.reads {
             info!("Reading from {:?}", path);
             bam::Reader::from_path(&path)?
         } else {
@@ -178,7 +195,7 @@ impl SimpleDepth {
             reader.set_threads(reader_num)?;
         }
         // If passed add ref_fasta
-        if let Some(ref_fasta) = self.ref_fasta {
+        if let Some(ref_fasta) = &self.ref_fasta {
             reader.set_reference(ref_fasta)?;
         }
         // Get a copy of the header
@@ -187,7 +204,12 @@ impl SimpleDepth {
         // Walk over pileups
         for p in reader.pileup() {
             let pileup = p?;
-            let pos = Position::from_pileup(pileup, &header);
+            let pos = Position::from_pileup(pileup, &header, |record| {
+                let flags = record.flags();
+                (!flags) & &self.include_flags == 0
+                    && flags & &self.exclude_flags == 0
+                    && &record.mapq() >= &self.min_mapq
+            });
             writer.serialize(pos)?;
         }
         writer.flush()?;
@@ -250,7 +272,8 @@ mod tests {
 
             Record::from_sam(&view, b"TWO_2\t147\tchr2\t55\t40\t25M\tchr2\t5\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             Record::from_sam(&view, b"THREE_2\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"FOUR_2\t147\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // A failure of QC
+            Record::from_sam(&view, b"FOUR_2\t659\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
         ];
 
         // Update the test/test.bam file
@@ -268,7 +291,12 @@ mod tests {
         for p in reader.pileup() {
             let pileup = p.unwrap();
             let tid = pileup.tid();
-            let pos = Position::from_pileup(pileup, &header);
+            let pos = Position::from_pileup(pileup, &header, |record| {
+                let flags = record.flags();
+                (!flags) & (0 as u16) == 0
+                    && flags & (3848 as u16) == 0
+                    && &record.mapq() >= &(0 as u8)
+            });
             positions[tid as usize].push(pos);
         }
         positions
@@ -318,6 +346,13 @@ mod tests {
         assert_eq!(positions[0][39].depth, 1);
         // NB: -6 bc there are 6 positions with no coverage from 44-50
         assert_eq!(positions[0][78 - 6].depth, 4);
+    }
+
+    #[rstest]
+    fn check_filters(positions: Vec<Vec<Position>>) {
+        // Verify that a read that has flags saying it failed QC got filtered out
+        assert_eq!(positions[1][81].depth, 1);
+        assert_eq!(positions[1][84].depth, 0);
     }
 
     #[rstest]
