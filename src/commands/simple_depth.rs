@@ -160,7 +160,6 @@ pub struct SimpleDepth {
 }
 
 impl SimpleDepth {
-    // TODO: Add special handling when the bam is indexed and read it multi-threaded mode, fetching on chr at a time
     // TODO: Allow specifying a region, multithreaded over regions
     // TODO: Add mate detection like sambamba
     // TODO: Update README and add a table explaining the output and options
@@ -169,8 +168,9 @@ impl SimpleDepth {
         info!("Running simple-depth on: {:?}", self.reads);
 
         let cpus = utils::determine_allowed_cpus(self.threads)?;
-        let half_cpus = std::cmp::max(cpus / 2, 1);
-        utils::set_rayon_global_pools_size(half_cpus)?;
+        // Keep two around for main thread and thread running the pool
+        let usable_cpus = std::cmp::max(cpus.checked_sub(2).unwrap_or(0), 1);
+        utils::set_rayon_global_pools_size(usable_cpus)?;
 
         // Set up output writer
         let raw_writer: Box<dyn Write> = match &self.output {
@@ -197,7 +197,7 @@ impl SimpleDepth {
 
             for tid in 0..header.target_count() {
                 let end = header.target_len(tid).unwrap();
-                let serial_step: u64 = std::cmp::min(1_000_000 * half_cpus as u64, end);
+                let serial_step: u64 = std::cmp::min(1_000_000 * usable_cpus as u64, end);
                 let par_step: u64 = std::cmp::min(1_000_000, end);
                 info!("Serial step of {} for {}", serial_step, tid);
                 info!("Parallel step of {} for {}", par_step, tid);
@@ -248,7 +248,6 @@ impl SimpleDepth {
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
-        reader.set_threads(1).expect("Setting threads");
         let header = reader.header().to_owned();
         reader.fetch(tid, start, stop).expect("Fetched a region");
         // Walk over pileups
