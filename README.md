@@ -4,7 +4,7 @@
 
 A highly parallelized utility for analyzing metrics at a per-base level.
 
-If a metric is missing, or performance is lacking. Please file a bug/feature issue.
+If a metric is missing, or performance is lacking. Please file a bug/feature issue. This tool aims to improve upon [`bam-readcount`](https://github.com/genome/bam-readcount).
 
 ## Installation
 
