@@ -125,7 +125,7 @@ impl Position {
     }
 }
 
-/// Calculate the depth at each base, per-base.
+/// Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "simple-depth")]
 pub struct SimpleDepth {
@@ -137,23 +137,23 @@ pub struct SimpleDepth {
     #[argh(option, short = 'r')]
     ref_fasta: Option<PathBuf>,
 
-    /// output path, defaults to stdout
+    /// output path. DEFAULT: stdout
     #[argh(option, short = 'o')]
     output: Option<PathBuf>,
 
-    /// the number of threads to use
+    /// the number of threads to use. DEFAULT: max_available
     #[argh(option, short = 't', default = "num_cpus::get()")]
     threads: usize,
 
-    /// SAM flags to include
+    /// SAM flags to include. DEFAULT: 0
     #[argh(option, short = 'f', default = "0")]
     include_flags: u16,
 
-    /// SAM flags to exclude
-    #[argh(option, short = 'F', default = "3848")]
+    /// SAM flags to exclude, recommended 3848. DEFAULT: 0
+    #[argh(option, short = 'F', default = "0")]
     exclude_flags: u16,
 
-    /// minimum mapq for a read to count toward depth
+    /// minimum mapq for a read to count toward depth. DEFAULT: 0
     #[argh(option, short = 'q', default = "0")]
     min_mapq: u8,
 }
