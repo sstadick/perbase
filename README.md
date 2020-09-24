@@ -12,6 +12,8 @@ If a metric is missing, or performance is lacking. Please file a bug/feature iss
 conda install -c bioconda perbase
 ```
 
+\* Check version, conda lags behind what you will find in the release page
+
 ## Tools
 
 ### simple-depth
