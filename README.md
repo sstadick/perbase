@@ -75,23 +75,24 @@ tabix output.tsv.gz chr1:5-10
 
 Usage:
 
-```bash
-Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-o <output>] [-t <threads>] [-f <include-flags>] [-F <exclude-flags>] [-q <min-mapq>]
+```text
+Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-b <bed-file>] [-o <output>] [-t <threads>] [-c <chunksize>] [-f <include-flags>] [-F <exclude-flags>] [-q <min-mapq>]
 
-Calculate the depth at each base, per-nucleotide.
-
-Arguments:
-  reads             indexed BAM/CRAM file
+Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
 
 Options:
   -r, --ref-fasta   indexed reference fasta, set if using CRAM
-  -o, --output      output path, defaults to stdout
-  -t, --threads     the number of threads to use
+  -b, --bed-file    a BED file containing regions of interest. If specified,
+                    only bases from the given regions will be reported on
+  -o, --output      output path. DEFAULT: stdout
+  -t, --threads     the number of threads to use. DEFAULT: max_available
+  -c, --chunksize   the ideal number of basepairs each worker receives. Total bp
+                    in memory at one time is (threads - 2) * chunksize
   -f, --include-flags
-                    SAM flags to include
+                    SAM flags to include. DEFAULT: 0
   -F, --exclude-flags
-                    SAM flags to exclude
-  -q, --min-mapq    minimum mapq for a read to count toward depth
+                    SAM flags to exclude, recommended 3848. DEFAULT: 0
+  -q, --min-mapq    minimum mapq for a read to count toward depth. DEFAULT: 0
   --help            display usage information
 ```
 
@@ -100,4 +101,3 @@ Options:
 - [ ] Add more metrics to match `bam-readcount` as an `indepth` tool
 - [ ] Add a strictly depth calculation a la `mosdepth` as an `onlydepth`
 - [ ] Add bgzip output / auto tabix indexing support
-- [ ] Support limiting inputs with an interval_list file

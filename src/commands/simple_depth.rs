@@ -5,24 +5,12 @@
 //! insertions / deletions at each position.
 use anyhow::Result;
 use argh::FromArgs;
-use bio::io::bed;
-use crossbeam_channel::unbounded;
-use grep_cli::stdout;
 use log::*;
-use perbase_lib::utils;
-use rayon::prelude::*;
+use perbase_lib::{par_io, utils};
 use rust_htslib::{bam, bam::Read};
-use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
 use smartstring::alias::String;
-use std::thread;
-use std::{
-    default,
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-};
-use termcolor::ColorChoice;
+use std::{default, path::PathBuf};
 
 /// Hold all information about a position.
 #[derive(Debug, Serialize, Default)]
@@ -140,7 +128,7 @@ pub struct SimpleDepth {
     ref_fasta: Option<PathBuf>,
 
     /// a BED file containing regions of interest. If specified, only bases from the given regions will be reported on
-    #[argh(option, short = 'i')]
+    #[argh(option, short = 'b')]
     bed_file: Option<PathBuf>,
 
     /// output path. DEFAULT: stdout
@@ -150,6 +138,10 @@ pub struct SimpleDepth {
     /// the number of threads to use. DEFAULT: max_available
     #[argh(option, short = 't', default = "num_cpus::get()")]
     threads: usize,
+
+    /// the ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize
+    #[argh(option, short = 'c')]
+    chunksize: Option<usize>, // default set by par_io at 1_000_000
 
     /// SAM flags to include. DEFAULT: 0
     #[argh(option, short = 'f', default = "0")]
@@ -165,8 +157,8 @@ pub struct SimpleDepth {
 }
 
 impl SimpleDepth {
-    // TODO: Allow specifying a region / bed file, multithreaded over regions
     // TODO: Add mate detection like sambamba
+    // TODO: move rayon pool setting to par_io
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
 
@@ -175,229 +167,52 @@ impl SimpleDepth {
         let usable_cpus = std::cmp::max(cpus.checked_sub(2).unwrap_or(0), 1);
         utils::set_rayon_global_pools_size(usable_cpus)?;
 
-        if let Some(bed_file) = &self.bed_file {
-            info!("Processing all BED file positions.");
-            let cloned = bed_file.clone();
-            self.process_bed(cloned, usable_cpus)?;
-        } else {
-            info!("Processing all positions.");
-            self.process_all(usable_cpus)?;
-        }
+        let par_io_runner = par_io::ParIO::new(
+            self.reads.clone(),
+            self.ref_fasta.clone(),
+            self.bed_file.clone(),
+            self.output.clone(),
+            Some(usable_cpus),
+            self.chunksize.clone(),
+        );
 
-        Ok(())
-    }
+        // par_io_runner.process(Self::process_region)?;
+        par_io_runner.process(move |tid, start, stop| {
+            info!("Processing region {}:{}-{}", tid, start, stop);
+            // Create a reader
+            let mut reader =
+                bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
 
-    /// Process a given region, calculating depths
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Position> {
-        info!("Processing region {}:{}-{}", tid, start, stop);
-        // Create a reader
-        let mut reader =
-            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
-
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta).expect("Set ref");
-        }
-
-        let header = reader.header().to_owned();
-        reader.fetch(tid, start, stop).expect("Fetched a region");
-        // Walk over pileups
-        let result: Vec<Position> = reader
-            .pileup()
-            .flat_map(|p| {
-                let pileup = p.expect("Extracted a pileup");
-                // Verify that we are within the bounds of the chunk we are iterating on
-                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-                    Some(Position::from_pileup(pileup, &header, |record| {
-                        let flags = record.flags();
-                        (!flags) & &self.include_flags == 0
-                            && flags & &self.exclude_flags == 0
-                            && &record.mapq() >= &self.min_mapq
-                    }))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        result
-    }
-
-    /// Process every position that has a read aligning to it.
-    fn process_all(self, usable_cpus: usize) -> Result<()> {
-        // Set up output writer
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer);
-
-        let (snd, rxv) = unbounded();
-        thread::spawn(move || {
-            info!("Reading from {:?}", &self.reads);
-            let mut reader = bam::IndexedReader::from_path(&self.reads).expect("Indexed BAM/CRAM");
             // If passed add ref_fasta
             if let Some(ref_fasta) = &self.ref_fasta {
                 reader.set_reference(ref_fasta).expect("Set ref");
             }
-            // Get a copy of the header
+
             let header = reader.header().to_owned();
-
-            for tid in 0..header.target_count() {
-                let end = header.target_len(tid).unwrap();
-                let serial_step: u64 = std::cmp::min(1_000_000 * usable_cpus as u64, end);
-                let par_step: u64 = std::cmp::min(1_000_000, end);
-                info!("Serial step of {} for {}", serial_step, tid);
-                info!("Parallel step of {} for {}", par_step, tid);
-
-                // Two step chunking
-                // NB: result holds onto the processed records and sends them to the printer,
-                // so at any given time a chunk of `serial_step` is is being processed and
-                // printed at the same time
-                let mut result = vec![];
-                for chunk_start in (0..end).step_by(serial_step as usize) {
-                    info!(
-                        "Processing super region: {}:{}-{}",
-                        tid,
-                        chunk_start,
-                        chunk_start + serial_step
-                    );
-                    let (r, _): (Vec<Position>, ()) = rayon::join(
-                        || {
-                            // NB: need to create vec of starts because step_by can't go into par_iter and
-                            // par_bridge appears to not preserve the order
-                            let starts: Vec<u64> = (chunk_start..chunk_start + serial_step)
-                                .step_by(par_step as usize)
-                                .collect();
-                            starts
-                                .into_par_iter()
-                                .flat_map(|start| self.process_region(tid, start, start + par_step))
-                                .collect()
-                        },
-                        || {
-                            result
-                                .into_iter()
-                                .for_each(|pos: Position| snd.send(pos).unwrap())
-                        },
-                    );
-                    result = r;
-                }
-                // Print out the last set of results sitting in the array
-                result
-                    .into_iter()
-                    .for_each(|pos: Position| snd.send(pos).unwrap());
-            }
-        });
-        rxv.into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
-        writer.flush()?;
-        Ok(())
-    }
-
-    /// Read a bed file into a vector of lappers with the index representing the TID
-    fn bed_to_intervals(header: &bam::HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<()>>> {
-        let mut bed_reader = bed::Reader::from_file(bed_file)?;
-        let mut intervals = vec![vec![]; header.target_count() as usize];
-        for record in bed_reader.records() {
-            // TODO add a proper error message
-            // TODO update rust_lapper to use u64
-            let record = record?;
-            let tid = header
-                .tid(record.chrom().as_bytes())
-                .expect("Chromosome not found in BAM/CRAM header");
-            intervals[tid as usize].push(Interval::<()> {
-                start: record.start() as u32,
-                stop: record.end() as u32,
-                val: (),
-            });
-        }
-
-        Ok(intervals
-            .into_iter()
-            .map(|ivs| {
-                let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
-                lapper
-            })
-            .collect())
-    }
-
-    /// Process only positions indicated by the input bed file.
-    fn process_bed(self, bed_file: PathBuf, usable_cpus: usize) -> Result<()> {
-        // Set up output writer
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer);
-
-        let (snd, rxv) = unbounded();
-        thread::spawn(move || {
-            info!("Reading from {:?}", &self.reads);
-            let mut reader = bam::IndexedReader::from_path(&self.reads).expect("Indexed BAM/CRAM");
-            // If passed add ref_fasta
-            if let Some(ref_fasta) = &self.ref_fasta {
-                reader.set_reference(ref_fasta).expect("Set ref");
-            }
-            let intervals =
-                Self::bed_to_intervals(reader.header(), &bed_file).expect("Parsed BED file");
-            // Get a copy of the header
-            let header = reader.header().to_owned();
-
-            // TODO: a better future way to do this would be to bin regions into 1_000_000 bp bins
-            for tid in 0..header.target_count() {
-                let merged_ivs = &intervals[tid as usize].intervals;
-                let total_regions = merged_ivs.len();
-                let serial_step = std::cmp::min(100_000 * usable_cpus, total_regions);
-                let par_step = std::cmp::min(100_000, total_regions);
-                info!("Serial step of {} for {}", serial_step, tid);
-                info!("Parallel step of {} for {}", par_step, tid);
-
-                // Two step chunking
-                // NB: result holds onto the processed records and sends them to the printer,
-                // so at any given time a chunk of `serial_step` is is being processed and
-                // printed at the same time
-                let mut result = vec![];
-                for chunk_start in (0..total_regions).step_by(serial_step) {
-                    info!(
-                        "Processing {}, {} - {}",
-                        tid,
-                        chunk_start,
-                        chunk_start + serial_step
-                    );
-                    let (r, _): (Vec<Position>, ()) = rayon::join(
-                        || {
-                            merged_ivs[chunk_start..chunk_start + serial_step]
-                                .par_iter()
-                                .flat_map(|iv| {
-                                    self.process_region(tid, iv.start as u64, iv.stop as u64)
-                                })
-                                .collect()
-                        },
-                        || {
-                            result
-                                .into_iter()
-                                .for_each(|pos: Position| snd.send(pos).unwrap())
-                        },
-                    );
-                    result = r;
-                }
-                // Print out the last set of results sitting in the array
-                result
-                    .into_iter()
-                    .for_each(|pos: Position| snd.send(pos).unwrap());
-            }
-        });
-        rxv.into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
-        writer.flush()?;
+            // fetch the region of interest
+            reader
+                .fetch(tid, start as u64, stop as u64)
+                .expect("Fetched a region");
+            // Walk over pileups
+            let result: Vec<Position> = reader
+                .pileup()
+                .flat_map(|p| {
+                    let pileup = p.expect("Extracted a pileup");
+                    // Verify that we are within the bounds of the chunk we are iterating on
+                    if (pileup.pos() as usize) >= start && (pileup.pos() as usize) < stop {
+                        Some(Position::from_pileup(pileup, &header, |record| {
+                            let flags = record.flags();
+                            (!flags) & &self.include_flags == 0
+                                && flags & &self.exclude_flags == 0
+                                && &record.mapq() >= &self.min_mapq
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            result
+        })?;
 
         Ok(())
     }
