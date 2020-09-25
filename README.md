@@ -9,7 +9,7 @@ If a metric is missing, or performance is lacking. Please file a bug/feature iss
 ## Installation
 
 ```bash
-conda install -c bioconda perbase
+conda install -c bioconda -c conda-forge perbase
 ```
 
 \* Check version, conda lags behind what you will find in the release page
