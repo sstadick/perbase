@@ -90,9 +90,10 @@ impl Position {
             // NB: Order matters here, a refskip is true for both is_del and is_refskip
             // while a true del is only true for is_del
             if alignment.is_refskip() {
-                pos.ref_skip += 1
+                pos.ref_skip += 1;
+                pos.depth -= 1;
             } else if alignment.is_del() {
-                pos.del += 1
+                pos.del += 1;
             } else {
                 // We have an actual base!
                 match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
@@ -377,11 +378,11 @@ mod tests {
     #[rstest]
     fn check_depths_refskips(positions: Vec<Vec<Position>>) {
         assert_eq!(positions[1][11].depth, 3);
-        assert_eq!(positions[1][12].depth, 3); // Skip
-        assert_eq!(positions[1][13].depth, 3); // Skip
-        assert_eq!(positions[1][14].depth, 4); // Skip
-        assert_eq!(positions[1][15].depth, 4); // Skip
-        assert_eq!(positions[1][16].depth, 4);
+        assert_eq!(positions[1][12].depth, 2); // Skip
+        assert_eq!(positions[1][13].depth, 2); // Skip
+        assert_eq!(positions[1][14].depth, 3); // Skip
+        assert_eq!(positions[1][15].depth, 3); // Skip
+        assert_eq!(positions[1][16].depth, 3); // Skip
         assert_eq!(positions[1][17].depth, 4);
     }
 }

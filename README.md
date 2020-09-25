@@ -26,7 +26,7 @@ The output columns are as follows:
 | -------- | -------------------------------------------------------------------------------------------------- |
 | REF      | The reference sequence name                                                                        |
 | POS      | The 1-based position on the reference sequence                                                     |
-| DEPTH    | The total depth at the position SUM(A, C, T, G, DEL, REF_SKIP)                                     |
+| DEPTH    | The total depth at the position SUM(A, C, T, G, DEL)                                               |
 | A        | Total A nucleotides seen at this position                                                          |
 | C        | Total C nucleotides seen at this position                                                          |
 | G        | Total G nucleotides seen at this position                                                          |
