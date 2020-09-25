@@ -40,7 +40,7 @@ struct Position {
     del: usize,
     /// Number of reads failing filters at this position.
     fail: usize,
-    /// Number of refskips at this position. Does count toward depth.
+    /// Number of refskips at this position. Does not count toward depth.
     ref_skip: usize,
 }
 impl Position {
