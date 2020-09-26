@@ -10,7 +10,34 @@ use perbase_lib::{par_io, utils};
 use rust_htslib::{bam, bam::Read};
 use serde::Serialize;
 use smartstring::alias::String;
+use std::collections::HashMap;
+use std::iter::FromIterator;
 use std::{default, path::PathBuf};
+
+#[derive(Debug)]
+struct MateDetector(HashMap<String, usize>);
+
+impl MateDetector {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn add(&mut self, observation: (String, bool)) {
+        if observation.1 {
+            *self.0.entry(observation.0).or_insert(0) += 1
+        }
+    }
+}
+
+impl FromIterator<(String, bool)> for MateDetector {
+    fn from_iter<I: IntoIterator<Item=(String, bool)>>(iter: I) -> Self {
+        let mut m = MateDetector::new();
+        for i in iter {
+            m.add(i)
+        }
+        m
+    }
+}
 
 /// Hold all information about a position.
 #[derive(Debug, Serialize, Default)]
@@ -61,6 +88,7 @@ impl Position {
     /// # Arguments
     ///
     /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
+    /// * `fixmate` - indicate whether an attempt should be made to not double count overlapping mates
     /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
     /// * `filter_fn` - a function to filter out reads, returning false will cause a read to be filtered
     // TODOs:
@@ -71,7 +99,11 @@ impl Position {
     // Average dist to ends
     // A calculated error rate based on mismatches?
     // Optionally display read names at the position?
-    fn from_pileup<F>(pileup: bam::pileup::Pileup, header: &bam::HeaderView, filter_fn: F) -> Self
+    fn from_pileup<F>(
+        pileup: bam::pileup::Pileup,
+        header: &bam::HeaderView,
+        filter_fn: F,
+    ) -> Self
     where
         F: Fn(&bam::record::Record) -> bool,
     {
@@ -80,38 +112,85 @@ impl Position {
         let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
         pos.depth = pileup.depth() as usize;
 
-        for alignment in pileup.alignments() {
+        let mate_detector: MateDetector = pileup.alignments().map(|alignment| {
             let record = alignment.record();
+            let qname = String::from(std::str::from_utf8(record.qname()).unwrap());
             if !filter_fn(&record) {
                 pos.depth -= 1;
                 pos.fail += 1;
-                continue;
-            }
-            // NB: Order matters here, a refskip is true for both is_del and is_refskip
-            // while a true del is only true for is_del
-            if alignment.is_refskip() {
-                pos.ref_skip += 1;
-                pos.depth -= 1;
-            } else if alignment.is_del() {
-                pos.del += 1;
+                (qname, false)
             } else {
-                // We have an actual base!
-                match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
-                    'A' => pos.a += 1,
-                    'C' => pos.c += 1,
-                    'T' => pos.t += 1,
-                    'G' => pos.g += 1,
-                    _ => pos.n += 1,
-                }
-                // Check for insertions
-                match alignment.indel() {
-                    bam::pileup::Indel::Ins(_len) => {
-                        pos.ins += 1;
+                // NB: Order matters here, a refskip is true for both is_del and is_refskip
+                // while a true del is only true for is_del
+                if alignment.is_refskip() {
+                    pos.ref_skip += 1;
+                    pos.depth -= 1;
+                    (qname, false)
+                } else if alignment.is_del() {
+                    pos.del += 1;
+                    (qname, true)
+                } else {
+                    // We have an actual base!
+                    match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
+                        'A' => pos.a += 1,
+                        'C' => pos.c += 1,
+                        'T' => pos.t += 1,
+                        'G' => pos.g += 1,
+                        _ => pos.n += 1,
                     }
-                    _ => (),
+                    // Check for insertions
+                    match alignment.indel() {
+                        bam::pileup::Indel::Ins(_len) => {
+                            pos.ins += 1;
+                        }
+                        _ => (),
+                    }
+                    (qname, true)
                 }
+            }
+        }).collect();
+
+        for (k, v) in mate_detector.0.iter() {
+            if *v > 1 {
+                info!("Mate overlap detected for {} of {}", k, v);
+                pos.depth -= v - 1;
             }
         }
+
+        // for alignment in pileup.alignments() {
+        //     let record = alignment.record();
+        //     let mut counted = false;
+        //     let qname = std::str::from_utf8(record.qname()).unwrap();
+        //     if !filter_fn(&record) {
+        //         pos.depth -= 1;
+        //         pos.fail += 1;
+        //         continue;
+        //     }
+        //     // NB: Order matters here, a refskip is true for both is_del and is_refskip
+        //     // while a true del is only true for is_del
+        //     if alignment.is_refskip() {
+        //         pos.ref_skip += 1;
+        //         pos.depth -= 1;
+        //     } else if alignment.is_del() {
+        //         pos.del += 1;
+        //     } else {
+        //         // We have an actual base!
+        //         match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
+        //             'A' => pos.a += 1,
+        //             'C' => pos.c += 1,
+        //             'T' => pos.t += 1,
+        //             'G' => pos.g += 1,
+        //             _ => pos.n += 1,
+        //         }
+        //         // Check for insertions
+        //         match alignment.indel() {
+        //             bam::pileup::Indel::Ins(_len) => {
+        //                 pos.ins += 1;
+        //             }
+        //             _ => (),
+        //         }
+        //     }
+        // }
         pos
     }
 }
@@ -159,25 +238,19 @@ pub struct SimpleDepth {
 
 impl SimpleDepth {
     // TODO: Add mate detection like sambamba
-    // TODO: move rayon pool setting to par_io
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
-
         let cpus = utils::determine_allowed_cpus(self.threads)?;
-        // Keep two around for main thread and thread running the pool
-        let usable_cpus = std::cmp::max(cpus.checked_sub(2).unwrap_or(0), 1);
-        utils::set_rayon_global_pools_size(usable_cpus)?;
 
         let par_io_runner = par_io::ParIO::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.output.clone(),
-            Some(usable_cpus),
+            Some(cpus),
             self.chunksize.clone(),
         );
 
-        // par_io_runner.process(Self::process_region)?;
         par_io_runner.process(move |tid, start, stop| {
             info!("Processing region {}:{}-{}", tid, start, stop);
             // Create a reader
@@ -267,7 +340,7 @@ mod tests {
             Record::from_sam(&view, b"FOUR\t67\tchr2\t15\t40\t25M\tchr2\t65\t75\tATAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // Overlapping mates
             Record::from_sam(&view, b"FIVE\t67\tchr2\t20\t40\t25M\tchr2\t35\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"FIVE_2\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
 
             // Other base
             Record::from_sam(&view, b"ONE_2\t147\tchr2\t50\t40\t25M\tchr2\t1\t75\tAAAAAAAAAAAAAAAAAAAAAYAAA\t#########################").unwrap(),
@@ -384,5 +457,21 @@ mod tests {
         assert_eq!(positions[1][15].depth, 3); // Skip
         assert_eq!(positions[1][16].depth, 3); // Skip
         assert_eq!(positions[1][17].depth, 4);
+    }
+
+    #[rstest]
+    fn check_mate_detection(positions: Vec<Vec<Position>>) {
+        assert_eq!(positions[1][33].depth, 4);
+        assert_eq!(positions[1][34].depth, 3); // mate overlap
+        assert_eq!(positions[1][35].depth, 3); // mate overlap
+        assert_eq!(positions[1][36].depth, 3); // mate overlap
+        assert_eq!(positions[1][37].depth, 3); // mate overlap
+        assert_eq!(positions[1][38].depth, 3); // mate overlap
+        assert_eq!(positions[1][39].depth, 1); // mate overlap
+        assert_eq!(positions[1][40].depth, 1); // mate overlap
+        assert_eq!(positions[1][41].depth, 1); // mate overlap
+        assert_eq!(positions[1][42].depth, 1); // mate overlap
+        assert_eq!(positions[1][43].depth, 1); // mate overlap
+        assert_eq!(positions[1][44].depth, 1);
     }
 }
