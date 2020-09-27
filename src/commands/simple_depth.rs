@@ -6,115 +6,13 @@
 use anyhow::Result;
 use argh::FromArgs;
 use log::*;
-use perbase_lib::{par_io, utils};
-use rust_htslib::{bam, bam::Read};
-use serde::Serialize;
-use smartstring::alias::String;
-use std::{default, path::PathBuf};
-
-/// Hold all information about a position.
-#[derive(Debug, Serialize, Default)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-struct Position {
-    /// Reference sequence name.
-    #[serde(rename = "REF")]
-    ref_seq: String,
-    /// 1-based position in the sequence.
-    pos: usize,
-    /// Total depth at this position.
-    depth: usize,
-    /// Number of A bases at this position.
-    a: usize,
-    /// Number of C bases at this position.
-    c: usize,
-    /// Number of G bases at this position.
-    g: usize,
-    /// Number of T bases at this position.
-    t: usize,
-    /// Number of N bases at this position. Any unrecognized base will be counted as an N.
-    n: usize,
-    /// Number of insertions that start to the right of this position.
-    /// Does not count toward depth.
-    ins: usize,
-    /// Number of deletions at this position.
-    del: usize,
-    /// Number of reads failing filters at this position.
-    fail: usize,
-    /// Number of refskips at this position. Does not count toward depth.
-    ref_skip: usize,
-}
-impl Position {
-    /// Create a new position for the given ref_seq name.
-    fn new(ref_seq: String, pos: usize) -> Self {
-        Position {
-            ref_seq,
-            pos,
-            ..default::Default::default()
-        }
-    }
-
-    /// Convert a pileup into a `Position`.
-    ///
-    /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
-    ///
-    /// # Arguments
-    ///
-    /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
-    /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
-    /// * `filter_fn` - a function to filter out reads, returning false will cause a read to be filtered
-    // TODOs:
-    // Write my own pilelup engine
-    // Reference base
-    // Average base quality
-    // Average map quality
-    // Average dist to ends
-    // A calculated error rate based on mismatches?
-    // Optionally display read names at the position?
-    fn from_pileup<F>(pileup: bam::pileup::Pileup, header: &bam::HeaderView, filter_fn: F) -> Self
-    where
-        F: Fn(&bam::record::Record) -> bool,
-    {
-        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
-        // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
-        pos.depth = pileup.depth() as usize;
-
-        for alignment in pileup.alignments() {
-            let record = alignment.record();
-            if !filter_fn(&record) {
-                pos.depth -= 1;
-                pos.fail += 1;
-                continue;
-            }
-            // NB: Order matters here, a refskip is true for both is_del and is_refskip
-            // while a true del is only true for is_del
-            if alignment.is_refskip() {
-                pos.ref_skip += 1;
-                pos.depth -= 1;
-            } else if alignment.is_del() {
-                pos.del += 1;
-            } else {
-                // We have an actual base!
-                match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
-                    'A' => pos.a += 1,
-                    'C' => pos.c += 1,
-                    'T' => pos.t += 1,
-                    'G' => pos.g += 1,
-                    _ => pos.n += 1,
-                }
-                // Check for insertions
-                match alignment.indel() {
-                    bam::pileup::Indel::Ins(_len) => {
-                        pos.ins += 1;
-                    }
-                    _ => (),
-                }
-            }
-        }
-        pos
-    }
-}
+use perbase_lib::{
+    par_io::{self, RegionProcessor},
+    position::{Position, ReadFilter},
+    utils,
+};
+use rust_htslib::{bam, bam::record::Record, bam::Read};
+use std::path::PathBuf;
 
 /// Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
 #[derive(FromArgs)]
@@ -152,6 +50,11 @@ pub struct SimpleDepth {
     #[argh(option, short = 'F', default = "0")]
     exclude_flags: u16,
 
+    // TODO: add to docs
+    /// fix overlapping mates counts, see docs for full details. DEAFAULT: off
+    #[argh(switch, short = 'm')]
+    mate_fix: bool,
+
     /// minimum mapq for a read to count toward depth. DEFAULT: 0
     #[argh(option, short = 'q', default = "0")]
     min_mapq: u8,
@@ -159,75 +62,152 @@ pub struct SimpleDepth {
 
 impl SimpleDepth {
     // TODO: Add mate detection like sambamba
-    // TODO: move rayon pool setting to par_io
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
-
         let cpus = utils::determine_allowed_cpus(self.threads)?;
-        // Keep two around for main thread and thread running the pool
-        let usable_cpus = std::cmp::max(cpus.checked_sub(2).unwrap_or(0), 1);
-        utils::set_rayon_global_pools_size(usable_cpus)?;
+
+        let read_filter =
+            SimpleReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
+        let simple_processor = SimpleProcessor::new(
+            self.reads.clone(),
+            self.ref_fasta.clone(),
+            self.mate_fix,
+            read_filter,
+        );
 
         let par_io_runner = par_io::ParIO::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.output.clone(),
-            Some(usable_cpus),
+            Some(cpus),
             self.chunksize.clone(),
+            simple_processor,
         );
 
-        // par_io_runner.process(Self::process_region)?;
-        par_io_runner.process(move |tid, start, stop| {
-            info!("Processing region {}:{}-{}", tid, start, stop);
-            // Create a reader
-            let mut reader =
-                bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
-
-            // If passed add ref_fasta
-            if let Some(ref_fasta) = &self.ref_fasta {
-                reader.set_reference(ref_fasta).expect("Set ref");
-            }
-
-            let header = reader.header().to_owned();
-            // fetch the region of interest
-            reader
-                .fetch(tid, start as u64, stop as u64)
-                .expect("Fetched a region");
-            // Walk over pileups
-            let result: Vec<Position> = reader
-                .pileup()
-                .flat_map(|p| {
-                    let pileup = p.expect("Extracted a pileup");
-                    // Verify that we are within the bounds of the chunk we are iterating on
-                    if (pileup.pos() as usize) >= start && (pileup.pos() as usize) < stop {
-                        Some(Position::from_pileup(pileup, &header, |record| {
-                            let flags = record.flags();
-                            (!flags) & &self.include_flags == 0
-                                && flags & &self.exclude_flags == 0
-                                && &record.mapq() >= &self.min_mapq
-                        }))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            result
-        })?;
-
+        par_io_runner.process()?;
         Ok(())
     }
 }
 
+/// A Simple impl of [ReadFilter]
+pub struct SimpleReadFilter {
+    include_flags: u16,
+    exclude_flags: u16,
+    min_mapq: u8,
+}
+
+impl SimpleReadFilter {
+    /// Create a SimpleReadFilter
+    fn new(include_flags: u16, exclude_flags: u16, min_mapq: u8) -> Self {
+        Self {
+            include_flags,
+            exclude_flags,
+            min_mapq,
+        }
+    }
+}
+
+impl ReadFilter for SimpleReadFilter {
+    /// Filter reads based SAM flags and mapping quality
+    #[inline]
+    fn filter_read(&self, read: &Record) -> bool {
+        let flags = read.flags();
+        (!flags) & &self.include_flags == 0
+            && flags & &self.exclude_flags == 0
+            && &read.mapq() >= &self.min_mapq
+    }
+}
+
+/// Holds the info needed for [par_io::RegionProcessor] implementation
+struct SimpleProcessor<F: ReadFilter> {
+    /// path to indexed BAM/CRAM
+    reads: PathBuf,
+    /// path to indexed ref file
+    ref_fasta: Option<PathBuf>,
+    /// Indicate whether or not to account for overlapping mates.
+    mate_fix: bool,
+    /// implementation of [position::ReadFilter] that will be used
+    read_filter: F,
+}
+
+impl<F: ReadFilter> SimpleProcessor<F> {
+    /// Create a new SimpleProcessor
+    fn new(reads: PathBuf, ref_fasta: Option<PathBuf>, mate_fix: bool, read_filter: F) -> Self {
+        Self {
+            reads,
+            ref_fasta,
+            mate_fix,
+            read_filter,
+        }
+    }
+}
+
+/// Implement [par_io::RegionProcessor] for [SimpleProcessor]
+impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
+    /// Objects of [position::Position] will be returned by each call to [SimpleProcessor::process_region]
+    type P = Position;
+
+    /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
+    /// walking the pileup (checking bounds) to create Position objects according to
+    /// the defined filters
+    fn process_region(&self, tid: u32, start: usize, stop: usize) -> Vec<Position> {
+        info!("Processing region {}:{}-{}", tid, start, stop);
+        // Create a reader
+        let mut reader =
+            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+
+        // If passed add ref_fasta
+        if let Some(ref_fasta) = &self.ref_fasta {
+            reader.set_reference(ref_fasta).expect("Set ref");
+        }
+
+        let header = reader.header().to_owned();
+        // fetch the region of interest
+        reader
+            .fetch(tid, start as u64, stop as u64)
+            .expect("Fetched a region");
+        // Walk over pileups
+        let result: Vec<Position> = reader
+            .pileup()
+            .flat_map(|p| {
+                let pileup = p.expect("Extracted a pileup");
+                // Verify that we are within the bounds of the chunk we are iterating on
+                if (pileup.pos() as usize) >= start && (pileup.pos() as usize) < stop {
+                    if self.mate_fix {
+                        Some(Position::from_pileup_mate_aware(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                        ))
+                    } else {
+                        Some(Position::from_pileup(pileup, &header, &self.read_filter))
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        result
+    }
+}
+
 #[cfg(test)]
+#[allow(unused)]
 mod tests {
     use super::*;
+    use perbase_lib::position::Position;
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use std::path::PathBuf;
 
     #[fixture]
-    fn positions() -> Vec<Vec<Position>> {
+    fn read_filter() -> SimpleReadFilter {
+        SimpleReadFilter::new(0, 512, 0)
+    }
+
+    #[fixture]
+    fn bamfile() -> PathBuf {
         // This keep the test bam up to date
         let path = PathBuf::from("test/test.bam");
         // Build a header
@@ -250,11 +230,11 @@ mod tests {
             Record::from_sam(&view, b"THREE\t67\tchr1\t10\t40\t25M\tchr1\t60\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             Record::from_sam(&view, b"FOUR\t67\tchr1\t15\t40\t25M\tchr1\t65\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             Record::from_sam(&view, b"FIVE\t67\tchr1\t20\t40\t25M\tchr1\t70\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"ONE_2\t147\tchr1\t50\t40\t25M\tchr1\t1\t75\tTTTTTTTTTTTTTTTTTTTTTTTTT\t#########################").unwrap(),
-            Record::from_sam(&view, b"TWO_2\t147\tchr1\t55\t40\t25M\tchr1\t5\t75\tGGGGGGGGGGGGGGGGGGGGGGGGG\t#########################").unwrap(),
-            Record::from_sam(&view, b"THREE_2\t147\tchr1\t60\t40\t25M\tchr1\t10\t75\tCCCCCCCCCCCCCCCCCCCCCCCCC\t#########################").unwrap(),
-            Record::from_sam(&view, b"FOUR_2\t147\tchr1\t65\t40\t25M\tchr1\t15\t75\tNNNNNNNNNNNNNNNNNNNNNNNNN\t#########################").unwrap(),
-            Record::from_sam(&view, b"FIVE_2\t147\tchr1\t70\t40\t25M\tchr1\t20\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"ONE\t147\tchr1\t50\t40\t25M\tchr1\t1\t75\tTTTTTTTTTTTTTTTTTTTTTTTTT\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO\t147\tchr1\t55\t40\t25M\tchr1\t5\t75\tGGGGGGGGGGGGGGGGGGGGGGGGG\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE\t147\tchr1\t60\t40\t25M\tchr1\t10\t75\tCCCCCCCCCCCCCCCCCCCCCCCCC\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR\t147\tchr1\t65\t40\t25M\tchr1\t15\t75\tNNNNNNNNNNNNNNNNNNNNNNNNN\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr1\t70\t40\t25M\tchr1\t20\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
 
             // Chr2 - Complex
             // Ins
@@ -267,15 +247,15 @@ mod tests {
             Record::from_sam(&view, b"FOUR\t67\tchr2\t15\t40\t25M\tchr2\t65\t75\tATAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // Overlapping mates
             Record::from_sam(&view, b"FIVE\t67\tchr2\t20\t40\t25M\tchr2\t35\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"FIVE_2\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
 
             // Other base
-            Record::from_sam(&view, b"ONE_2\t147\tchr2\t50\t40\t25M\tchr2\t1\t75\tAAAAAAAAAAAAAAAAAAAAAYAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"ONE\t147\tchr2\t50\t40\t25M\tchr2\t1\t75\tAAAAAAAAAAAAAAAAAAAAAYAAA\t#########################").unwrap(),
 
-            Record::from_sam(&view, b"TWO_2\t147\tchr2\t55\t40\t25M\tchr2\t5\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"THREE_2\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO\t147\tchr2\t55\t40\t25M\tchr2\t5\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // A failure of QC
-            Record::from_sam(&view, b"FOUR_2\t659\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR\t659\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
         ];
 
         // Update the test/test.bam file
@@ -284,35 +264,61 @@ mod tests {
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
         }
-        drop(writer); // Drop writer so filehandle closes
+        path
+    }
 
+    #[fixture]
+    fn non_mate_aware_positions(
+        bamfile: PathBuf,
+        read_filter: SimpleReadFilter,
+    ) -> Vec<Vec<Position>> {
         // Extract bam into Positions
-        let mut reader = bam::Reader::from_path(&path).expect("Opened bam for reading");
+        let mut reader = bam::Reader::from_path(&bamfile).expect("Opened bam for reading");
         let header = reader.header().to_owned();
         let mut positions = vec![vec![], vec![]];
         for p in reader.pileup() {
             let pileup = p.unwrap();
             let tid = pileup.tid();
-            let pos = Position::from_pileup(pileup, &header, |record| {
-                let flags = record.flags();
-                (!flags) & (0 as u16) == 0
-                    && flags & (3848 as u16) == 0
-                    && &record.mapq() >= &(0 as u8)
-            });
+            let pos = Position::from_pileup(pileup, &header, &read_filter);
             positions[tid as usize].push(pos);
         }
         positions
     }
 
-    #[rstest]
-    fn check_insertions(positions: Vec<Vec<Position>>) {
+    #[fixture]
+    fn mate_aware_positions(bamfile: PathBuf, read_filter: SimpleReadFilter) -> Vec<Vec<Position>> {
+        // Extract bam into Positions
+        let mut reader = bam::Reader::from_path(&bamfile).expect("Opened bam for reading");
+        let header = reader.header().to_owned();
+        let mut positions = vec![vec![], vec![]];
+        for p in reader.pileup() {
+            let pileup = p.unwrap();
+            let tid = pileup.tid();
+            let pos = Position::from_pileup_mate_aware(pileup, &header, &read_filter);
+            positions[tid as usize].push(pos);
+        }
+        positions
+    }
+
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_insertions(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][0].ins, 0);
         assert_eq!(positions[1][1].ins, 1);
         assert_eq!(positions[1][2].ins, 0);
     }
 
-    #[rstest]
-    fn check_deletions(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_deletions(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][5].del, 0);
         assert_eq!(positions[1][6].del, 1);
         assert_eq!(positions[1][7].del, 1);
@@ -322,8 +328,13 @@ mod tests {
         assert_eq!(positions[1][11].del, 0);
     }
 
-    #[rstest]
-    fn check_refskips(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_refskips(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][11].ref_skip, 0);
         assert_eq!(positions[1][12].ref_skip, 1);
         assert_eq!(positions[1][13].ref_skip, 1);
@@ -333,9 +344,13 @@ mod tests {
         assert_eq!(positions[1][17].ref_skip, 0);
     }
 
-    #[rstest]
-    // TODO: Make mate aware
-    fn check_depths(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_depths(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         dbg!(&positions[0]);
         assert_eq!(positions[0][0].depth, 1);
         assert_eq!(positions[0][4].depth, 2);
@@ -350,22 +365,39 @@ mod tests {
         assert_eq!(positions[0][78 - 6].depth, 4);
     }
 
-    #[rstest]
-    fn check_filters(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_filters(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         // Verify that a read that has flags saying it failed QC got filtered out
         assert_eq!(positions[1][81].depth, 1);
         assert_eq!(positions[1][84].depth, 0);
+        assert_eq!(positions[1][81].fail, 1);
+        assert_eq!(positions[1][84].fail, 1);
     }
 
-    #[rstest]
-    fn check_depths_insertions(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_depths_insertions(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][0].depth, 1);
         assert_eq!(positions[1][1].depth, 1); // Insertion is here
         assert_eq!(positions[1][2].depth, 1);
     }
 
-    #[rstest]
-    fn check_depths_deletions(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_depths_deletions(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][5].depth, 2);
         assert_eq!(positions[1][6].depth, 2); // Del
         assert_eq!(positions[1][7].depth, 2); // Del
@@ -375,8 +407,13 @@ mod tests {
         assert_eq!(positions[1][11].depth, 3);
     }
 
-    #[rstest]
-    fn check_depths_refskips(positions: Vec<Vec<Position>>) {
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_depths_refskips(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
         assert_eq!(positions[1][11].depth, 3);
         assert_eq!(positions[1][12].depth, 2); // Skip
         assert_eq!(positions[1][13].depth, 2); // Skip
@@ -384,5 +421,39 @@ mod tests {
         assert_eq!(positions[1][15].depth, 3); // Skip
         assert_eq!(positions[1][16].depth, 3); // Skip
         assert_eq!(positions[1][17].depth, 4);
+    }
+
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
+    )]
+    fn check_mate_detection(positions: Vec<Vec<Position>>, awareness_modifier: usize) {
+        assert_eq!(positions[1][33].depth, 4);
+        assert_eq!(positions[1][34].depth, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][35].depth, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][36].depth, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][37].depth, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][38].depth, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][39].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][40].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][41].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][42].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][43].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][44].depth, 1);
+
+        assert_eq!(positions[1][33].a, 4);
+        assert_eq!(positions[1][34].a, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][35].a, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][36].a, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][37].a, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][38].a, 4 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][39].a, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][40].a, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][41].a, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][42].a, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][43].a, 2 - awareness_modifier); // mate overlap
+        assert_eq!(positions[1][44].a, 1);
     }
 }

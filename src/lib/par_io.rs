@@ -1,5 +1,6 @@
-//! A Helper module for iterating over regions of a BAM/CRAM file in parallel,
-//! operating on the at region, and printing a result.
+//! # ParIO
+//!
+//! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
 use bio::io::bed;
 use crossbeam::channel::unbounded;
@@ -18,8 +19,20 @@ use std::{
 };
 use termcolor::ColorChoice;
 
+/// RegionProcessor defines the methods that must be implemented to process a region
+pub trait RegionProcessor {
+    /// A vector of P make up the output of [RegionProcessor::process_region] and
+    /// are values associated with each position.
+    type P: 'static + Send + Sync + Serialize;
+
+    /// A function that takes the tid, start, and stop and returns something serializable.
+    /// Note, a common use of this function will be a `fetch` -> `pileup`. The pileup must
+    /// be bounds checked.
+    fn process_region(&self, tid: u32, start: usize, stop: usize) -> Vec<Self::P>;
+}
+
 #[derive(Debug)]
-pub struct ParIO {
+pub struct ParIO<R: 'static + RegionProcessor + Send + Sync> {
     /// Path to an indexed BAM / CRAM file
     reads: PathBuf,
     /// Optional reference file for CRAM
@@ -32,10 +45,24 @@ pub struct ParIO {
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
     chunksize: usize,
+    /// The rayon threadpool to operate in
+    pool: rayon::ThreadPool,
+    /// The implementaiton of [RegionProcessor] that will be used to process regions
+    processor: R,
 }
 
-impl ParIO {
+impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     /// Create a ParIO object
+    ///
+    /// # Arguments
+    ///
+    /// * `reads`- path to an indexed BAM/CRAM
+    /// * `ref_fasta`- path to an indexed reference file for CRAM
+    /// * `regions_bed`- Optional BED file path restricting the regions to be examined
+    /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
+    /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
+    ///                each worker will get to work on at one time.
+    /// * `processor`- Something that implements [RegionProcessor]
     pub fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -43,12 +70,20 @@ impl ParIO {
         output_file: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
+        processor: R,
     ) -> Self {
         let threads = if let Some(threads) = threads {
             threads
         } else {
             num_cpus::get()
         };
+
+        // Keep two around for main thread and thread running the pool
+        let threads = std::cmp::max(threads.checked_sub(2).unwrap_or(0), 1);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
 
         let chunksize = if let Some(chunksize) = chunksize {
             chunksize
@@ -64,6 +99,8 @@ impl ParIO {
             output_file,
             threads,
             chunksize,
+            pool,
+            processor,
         }
     }
 
@@ -90,72 +127,71 @@ impl ParIO {
     /// While one 'super chunk' is being worked on by all workers, the last 'super chunks' results are being printed to either to
     /// a file or to STDOUT, in order.
     ///
-    /// # Arguments
-    ///
-    /// - `process_region`: a function that takes the tid, start, and stop and returns something serializable
-    /// - `chunksize`: optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
-    ///                each worker will get to work on at one time.
-    pub fn process<S, F>(self, process_region: F) -> Result<()>
-    where
-        S: 'static + Serialize + Send + Sync,
-        F: 'static + Fn(u32, usize, usize) -> Vec<S> + Send + Sync,
-    {
+    /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
+    /// checked since a fetch will pull all reads that overlap the region in question.
+    pub fn process(self) -> Result<()> {
         let mut writer = self.get_writer()?;
 
         let (snd, rxv) = unbounded();
         thread::spawn(move || {
-            info!("Reading from {:?}", self.reads);
-            let mut reader = IndexedReader::from_path(&self.reads).expect("Indexed BAM/CRAM");
-            // If passed add ref_fasta
-            if let Some(ref_fasta) = &self.ref_fasta {
-                reader.set_reference(ref_fasta).expect("Set ref");
-            }
-            // Get a copy of the header
-            let header = reader.header().to_owned();
-
-            let intervals = if let Some(regions_bed) = &self.regions_bed {
-                Self::bed_to_intervals(&header, regions_bed).expect("Parsed BED to intervals")
-            } else {
-                Self::header_to_intervals(&header, self.chunksize)
-                    .expect("Parsed BAM/CRAM header to intervals")
-            };
-
-            // The number positions to try to process in one batch
-            let serial_step_size = self.chunksize * self.threads; // aka superchunk
-            for (tid, intervals) in intervals.into_iter().enumerate() {
-                let tid: u32 = tid as u32;
-                let tid_end = header.target_len(tid).unwrap() as usize;
-                // Result holds the processed positions to be sent to writer
-                let mut result = vec![];
-                for chunk_start in (0..tid_end).step_by(serial_step_size) {
-                    let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
-                    info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
-                    let (r, _): (Vec<S>, ()) = rayon::join(
-                        || {
-                            // Must be a vec so that par_iter works and results stay in order
-                            let ivs: Vec<Interval<()>> = intervals
-                                .find(chunk_start as u32, chunk_end as u32)
-                                .map(|iv| iv.clone())
-                                .collect();
-                            ivs.into_par_iter()
-                                .flat_map(|iv| {
-                                    process_region(tid, iv.start as usize, iv.stop as usize)
-                                })
-                                .collect()
-                        },
-                        || {
-                            result.into_iter().for_each(|s: S| {
-                                snd.send(s).expect("Sent a serializable to writer")
-                            })
-                        },
-                    );
-                    result = r;
+            self.pool.install(|| {
+                info!("Reading from {:?}", self.reads);
+                let mut reader = IndexedReader::from_path(&self.reads).expect("Indexed BAM/CRAM");
+                // If passed add ref_fasta
+                if let Some(ref_fasta) = &self.ref_fasta {
+                    reader.set_reference(ref_fasta).expect("Set ref");
                 }
-                // Send final set of results
-                result
-                    .into_iter()
-                    .for_each(|s: S| snd.send(s).expect("Sent a serializable to writer"));
-            }
+                // Get a copy of the header
+                let header = reader.header().to_owned();
+
+                let intervals = if let Some(regions_bed) = &self.regions_bed {
+                    Self::bed_to_intervals(&header, regions_bed).expect("Parsed BED to intervals")
+                } else {
+                    Self::header_to_intervals(&header, self.chunksize)
+                        .expect("Parsed BAM/CRAM header to intervals")
+                };
+
+                // The number positions to try to process in one batch
+                let serial_step_size = self.chunksize * self.threads; // aka superchunk
+                for (tid, intervals) in intervals.into_iter().enumerate() {
+                    let tid: u32 = tid as u32;
+                    let tid_end = header.target_len(tid).unwrap() as usize;
+                    // Result holds the processed positions to be sent to writer
+                    let mut result = vec![];
+                    for chunk_start in (0..tid_end).step_by(serial_step_size) {
+                        let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
+                        info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
+                        let (r, _) = rayon::join(
+                            || {
+                                // Must be a vec so that par_iter works and results stay in order
+                                let ivs: Vec<Interval<()>> = intervals
+                                    .find(chunk_start as u32, chunk_end as u32)
+                                    .map(|iv| iv.clone())
+                                    .collect();
+                                ivs.into_par_iter()
+                                    .flat_map(|iv| {
+                                        self.processor.process_region(
+                                            tid,
+                                            iv.start as usize,
+                                            iv.stop as usize,
+                                        )
+                                    })
+                                    .collect()
+                            },
+                            || {
+                                result.into_iter().for_each(|p| {
+                                    snd.send(p).expect("Sent a serializable to writer")
+                                })
+                            },
+                        );
+                        result = r;
+                    }
+                    // Send final set of results
+                    result
+                        .into_iter()
+                        .for_each(|p| snd.send(p).expect("Sent a serializable to writer"));
+                }
+            });
         });
         rxv.into_iter()
             .for_each(|pos| writer.serialize(pos).unwrap());
