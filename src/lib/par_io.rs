@@ -32,7 +32,7 @@ pub trait RegionProcessor {
 }
 
 #[derive(Debug)]
-pub struct ParIO<R: 'static + RegionProcessor + Send + Sync > {
+pub struct ParIO<R: 'static + RegionProcessor + Send + Sync> {
     /// Path to an indexed BAM / CRAM file
     reads: PathBuf,
     /// Optional reference file for CRAM
@@ -48,7 +48,7 @@ pub struct ParIO<R: 'static + RegionProcessor + Send + Sync > {
     /// The rayon threadpool to operate in
     pool: rayon::ThreadPool,
     /// The implementaiton of [RegionProcessor] that will be used to process regions
-    processor: R
+    processor: R,
 }
 
 impl<R: RegionProcessor + Send + Sync> ParIO<R> {
@@ -70,7 +70,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
         output_file: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
-        processor: R
+        processor: R,
     ) -> Self {
         let threads = if let Some(threads) = threads {
             threads
@@ -100,7 +100,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
             threads,
             chunksize,
             pool,
-            processor
+            processor,
         }
     }
 
@@ -129,8 +129,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     ///
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
-    pub fn process(self) -> Result<()>
-    {
+    pub fn process(self) -> Result<()> {
         let mut writer = self.get_writer()?;
 
         let (snd, rxv) = unbounded();
@@ -171,7 +170,11 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
                                     .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
-                                        self.processor.process_region(tid, iv.start as usize, iv.stop as usize)
+                                        self.processor.process_region(
+                                            tid,
+                                            iv.start as usize,
+                                            iv.stop as usize,
+                                        )
                                     })
                                     .collect()
                             },

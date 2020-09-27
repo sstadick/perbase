@@ -8,12 +8,11 @@ use argh::FromArgs;
 use log::*;
 use perbase_lib::{
     par_io::{self, RegionProcessor},
+    position::{Position, ReadFilter},
     utils,
-    position::{Position, ReadFilter}
 };
 use rust_htslib::{bam, bam::record::Record, bam::Read};
-use std::{ path::PathBuf};
-
+use std::path::PathBuf;
 
 /// Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
 #[derive(FromArgs)]
@@ -67,12 +66,13 @@ impl SimpleDepth {
         info!("Running simple-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let read_filter = SimpleReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
+        let read_filter =
+            SimpleReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
         let simple_processor = SimpleProcessor::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
-            read_filter
+            read_filter,
         );
 
         let par_io_runner = par_io::ParIO::new(
@@ -82,7 +82,7 @@ impl SimpleDepth {
             self.output.clone(),
             Some(cpus),
             self.chunksize.clone(),
-            simple_processor
+            simple_processor,
         );
 
         par_io_runner.process()?;
@@ -94,13 +94,17 @@ impl SimpleDepth {
 pub struct SimpleReadFilter {
     include_flags: u16,
     exclude_flags: u16,
-    min_mapq: u8
+    min_mapq: u8,
 }
 
 impl SimpleReadFilter {
     /// Create a SimpleReadFilter
     fn new(include_flags: u16, exclude_flags: u16, min_mapq: u8) -> Self {
-        Self { include_flags, exclude_flags, min_mapq }
+        Self {
+            include_flags,
+            exclude_flags,
+            min_mapq,
+        }
     }
 }
 
@@ -124,17 +128,18 @@ struct SimpleProcessor<F: ReadFilter> {
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
     /// implementation of [position::ReadFilter] that will be used
-    read_filter: F
+    read_filter: F,
 }
 
 impl<F: ReadFilter> SimpleProcessor<F> {
     /// Create a new SimpleProcessor
-    fn new(
-        reads: PathBuf,
-        ref_fasta: Option<PathBuf>,
-        mate_fix: bool,
-        read_filter: F) -> Self {
-        Self {reads, ref_fasta, mate_fix, read_filter}
+    fn new(reads: PathBuf, ref_fasta: Option<PathBuf>, mate_fix: bool, read_filter: F) -> Self {
+        Self {
+            reads,
+            ref_fasta,
+            mate_fix,
+            read_filter,
+        }
     }
 }
 
@@ -155,7 +160,7 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
         // If passed add ref_fasta
         if let Some(ref_fasta) = &self.ref_fasta {
             reader.set_reference(ref_fasta).expect("Set ref");
-       }
+        }
 
         let header = reader.header().to_owned();
         // fetch the region of interest
@@ -170,7 +175,11 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
                 // Verify that we are within the bounds of the chunk we are iterating on
                 if (pileup.pos() as usize) >= start && (pileup.pos() as usize) < stop {
                     if self.mate_fix {
-                        Some(Position::from_pileup_mate_aware(pileup, &header, &self.read_filter))
+                        Some(Position::from_pileup_mate_aware(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                        ))
                     } else {
                         Some(Position::from_pileup(pileup, &header, &self.read_filter))
                     }
@@ -187,10 +196,10 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
 #[allow(unused)]
 mod tests {
     use super::*;
+    use perbase_lib::position::Position;
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use std::path::PathBuf;
-    use perbase_lib::position::Position;
 
     #[fixture]
     fn read_filter() -> SimpleReadFilter {
@@ -259,7 +268,10 @@ mod tests {
     }
 
     #[fixture]
-    fn non_mate_aware_positions(bamfile: PathBuf, read_filter: SimpleReadFilter) -> Vec<Vec<Position>> {
+    fn non_mate_aware_positions(
+        bamfile: PathBuf,
+        read_filter: SimpleReadFilter,
+    ) -> Vec<Vec<Position>> {
         // Extract bam into Positions
         let mut reader = bam::Reader::from_path(&bamfile).expect("Opened bam for reading");
         let header = reader.header().to_owned();
@@ -288,7 +300,9 @@ mod tests {
         positions
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -298,7 +312,9 @@ mod tests {
         assert_eq!(positions[1][2].ins, 0);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -312,7 +328,9 @@ mod tests {
         assert_eq!(positions[1][11].del, 0);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -326,7 +344,9 @@ mod tests {
         assert_eq!(positions[1][17].ref_skip, 0);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -345,7 +365,9 @@ mod tests {
         assert_eq!(positions[0][78 - 6].depth, 4);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -357,7 +379,9 @@ mod tests {
         assert_eq!(positions[1][84].fail, 1);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -367,7 +391,9 @@ mod tests {
         assert_eq!(positions[1][2].depth, 1);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -381,7 +407,9 @@ mod tests {
         assert_eq!(positions[1][11].depth, 3);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
@@ -395,7 +423,9 @@ mod tests {
         assert_eq!(positions[1][17].depth, 4);
     }
 
-    #[rstest(positions, awareness_modifier,
+    #[rstest(
+        positions,
+        awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
     )]

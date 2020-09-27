@@ -1,12 +1,15 @@
 //! # Position
 //!
 //! A module for holding all the information about a given genomic position.
-use rust_htslib::bam::{record::Record, pileup::{Pileup,Alignment}, self};
-use serde::Serialize;
-use std::{cmp::Ordering, default};
 use itertools::Itertools;
+use rust_htslib::bam::{
+    self,
+    pileup::{Alignment, Pileup},
+    record::Record,
+};
+use serde::Serialize;
 use smartstring::alias::String;
-use smallvec::SmallVec;
+use std::{cmp::Ordering, default};
 
 // TODOs:
 // Write my own pilelup engine
@@ -69,7 +72,7 @@ impl Position {
         if !read_filter.filter_read(&record) {
             self.depth -= 1;
             self.fail += 1;
-            return
+            return;
         }
         // NB: Order matters here, a refskip is true for both is_del and is_refskip
         // while a true del is only true for is_del
@@ -107,8 +110,11 @@ impl Position {
     /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
     /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
-    pub fn from_pileup<F: ReadFilter>(pileup: Pileup, header: &bam::HeaderView, read_filter: &F) -> Self
-    {
+    pub fn from_pileup<F: ReadFilter>(
+        pileup: Pileup,
+        header: &bam::HeaderView,
+        read_filter: &F,
+    ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
         let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
@@ -138,9 +144,8 @@ impl Position {
     pub fn from_pileup_mate_aware<F: ReadFilter>(
         pileup: Pileup,
         header: &bam::HeaderView,
-        read_filter: &F
-    ) -> Self
-    {
+        read_filter: &F,
+    ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
         let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
@@ -162,7 +167,10 @@ impl Position {
             let mut total_reads = 0; // count how many reads there were
             let (alignment, record) = reads
                 .into_iter()
-                .map(|x| {total_reads += 1; x})
+                .map(|x| {
+                    total_reads += 1;
+                    x
+                })
                 .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
                     Ordering::Greater => Ordering::Greater,
                     Ordering::Less => Ordering::Less,
