@@ -99,14 +99,3 @@ Options:
   -q, --min-mapq    minimum mapq for a read to count toward depth. DEFAULT: 0
   --help            display usage information
 ```
-
-## TODOs
-
-- [ ] Add tests to par_io
-- [ ] Look into pre-processing bam to annotate mate pair overlaps
-- [ ] Add per-readgroup support in some way
-- [ ] Switch to using clap
-- [ ] Add more metrics to match `bam-readcount` as an `indepth` tool
-- [ ] Add a strictly depth calculation a la `mosdepth` as an `onlydepth`
-- [ ] Add bgzip output / auto tabix indexing support
-- [ ] Add custom pileup engine that better supports threading
