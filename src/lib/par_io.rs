@@ -1,5 +1,6 @@
-//! A Helper module for iterating over regions of a BAM/CRAM file in parallel,
-//! operating on the at region, and printing a result.
+//! # ParIO
+//!
+//! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
 use bio::io::bed;
 use crossbeam::channel::unbounded;
@@ -18,8 +19,20 @@ use std::{
 };
 use termcolor::ColorChoice;
 
+/// RegionProcessor defines the methods that must be implemented to process a region
+pub trait RegionProcessor {
+    /// A vector of P make up the output of [RegionProcessor::process_region] and
+    /// are values associated with each position.
+    type P: 'static + Send + Sync + Serialize;
+
+    /// A function that takes the tid, start, and stop and returns something serializable.
+    /// Note, a common use of this function will be a `fetch` -> `pileup`. The pileup must
+    /// be bounds checked.
+    fn process_region(&self, tid: u32, start: usize, stop: usize) -> Vec<Self::P>;
+}
+
 #[derive(Debug)]
-pub struct ParIO {
+pub struct ParIO<R: 'static + RegionProcessor + Send + Sync > {
     /// Path to an indexed BAM / CRAM file
     reads: PathBuf,
     /// Optional reference file for CRAM
@@ -34,10 +47,22 @@ pub struct ParIO {
     chunksize: usize,
     /// The rayon threadpool to operate in
     pool: rayon::ThreadPool,
+    /// The implementaiton of [RegionProcessor] that will be used to process regions
+    processor: R
 }
 
-impl ParIO {
+impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     /// Create a ParIO object
+    ///
+    /// # Arguments
+    ///
+    /// * `reads`- path to an indexed BAM/CRAM
+    /// * `ref_fasta`- path to an indexed reference file for CRAM
+    /// * `regions_bed`- Optional BED file path restricting the regions to be examined
+    /// * `treads`- Optional threads to restrict the number of threads this process will use, defaults to all
+    /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
+    ///                each worker will get to work on at one time.
+    /// * `processor`- Something that implements [RegionProcessor]
     pub fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -45,6 +70,7 @@ impl ParIO {
         output_file: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
+        processor: R
     ) -> Self {
         let threads = if let Some(threads) = threads {
             threads
@@ -74,6 +100,7 @@ impl ParIO {
             threads,
             chunksize,
             pool,
+            processor
         }
     }
 
@@ -102,16 +129,7 @@ impl ParIO {
     ///
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
-    ///
-    /// # Arguments
-    ///
-    /// - `process_region`: a function that takes the tid, start, and stop and returns something serializable
-    /// - `chunksize`: optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
-    ///                each worker will get to work on at one time.
-    pub fn process<S, F>(self, process_region: F) -> Result<()>
-    where
-        S: 'static + Serialize + Send + Sync,
-        F: 'static + Fn(u32, usize, usize) -> Vec<S> + Send + Sync,
+    pub fn process(self) -> Result<()>
     {
         let mut writer = self.get_writer()?;
 
@@ -144,7 +162,7 @@ impl ParIO {
                     for chunk_start in (0..tid_end).step_by(serial_step_size) {
                         let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
                         info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
-                        let (r, _): (Vec<S>, ()) = rayon::join(
+                        let (r, _) = rayon::join(
                             || {
                                 // Must be a vec so that par_iter works and results stay in order
                                 let ivs: Vec<Interval<()>> = intervals
@@ -153,13 +171,13 @@ impl ParIO {
                                     .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
-                                        process_region(tid, iv.start as usize, iv.stop as usize)
+                                        self.processor.process_region(tid, iv.start as usize, iv.stop as usize)
                                     })
                                     .collect()
                             },
                             || {
-                                result.into_iter().for_each(|s: S| {
-                                    snd.send(s).expect("Sent a serializable to writer")
+                                result.into_iter().for_each(|p| {
+                                    snd.send(p).expect("Sent a serializable to writer")
                                 })
                             },
                         );
@@ -168,7 +186,7 @@ impl ParIO {
                     // Send final set of results
                     result
                         .into_iter()
-                        .for_each(|s: S| snd.send(s).expect("Sent a serializable to writer"));
+                        .for_each(|p| snd.send(p).expect("Sent a serializable to writer"));
                 }
             });
         });
