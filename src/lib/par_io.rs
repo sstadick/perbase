@@ -59,7 +59,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     /// * `reads`- path to an indexed BAM/CRAM
     /// * `ref_fasta`- path to an indexed reference file for CRAM
     /// * `regions_bed`- Optional BED file path restricting the regions to be examined
-    /// * `treads`- Optional threads to restrict the number of threads this process will use, defaults to all
+    /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
     /// * `processor`- Something that implements [RegionProcessor]

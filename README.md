@@ -64,7 +64,7 @@ chr2    16      4       2       0       0       1       0       0       0       
 chr2    17      4       3       0       0       0       0       0       0       0       1
 ```
 
-If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Using `--mate-fix` is slower by several orders of magnitude.
+If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
 
 The output can be compressed and indexed as follows:
 
@@ -102,6 +102,11 @@ Options:
 
 ## TODOs
 
+- [ ] Add tests to par_io
+- [ ] Look into pre-processing bam to annotate mate pair overlaps
+- [ ] Add per-readgroup support in some way
+- [ ] Switch to using clap
 - [ ] Add more metrics to match `bam-readcount` as an `indepth` tool
 - [ ] Add a strictly depth calculation a la `mosdepth` as an `onlydepth`
 - [ ] Add bgzip output / auto tabix indexing support
+- [ ] Add custom pileup engine that better supports threading
