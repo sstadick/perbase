@@ -64,6 +64,8 @@ chr2    16      4       2       0       0       1       0       0       0       
 chr2    17      4       3       0       0       0       0       0       0       0       1
 ```
 
+If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Using `--mate-fix` is slower by several orders of magnitude.
+
 The output can be compressed and indexed as follows:
 
 ```bash
@@ -76,7 +78,7 @@ tabix output.tsv.gz chr1:5-10
 Usage:
 
 ```text
-Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-b <bed-file>] [-o <output>] [-t <threads>] [-c <chunksize>] [-f <include-flags>] [-F <exclude-flags>] [-q <min-mapq>]
+Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-b <bed-file>] [-o <output>] [-t <threads>] [-c <chunksize>] [-f <include-flags>] [-F <exclude-flags>] [-m] [-q <min-mapq>]
 
 Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
 
@@ -92,6 +94,8 @@ Options:
                     SAM flags to include. DEFAULT: 0
   -F, --exclude-flags
                     SAM flags to exclude, recommended 3848. DEFAULT: 0
+  -m, --mate-fix    fix overlapping mates counts, see docs for full details.
+                    DEAFAULT: off
   -q, --min-mapq    minimum mapq for a read to count toward depth. DEFAULT: 0
   --help            display usage information
 ```
