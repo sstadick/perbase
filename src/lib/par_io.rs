@@ -166,10 +166,16 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
                                 // Must be a vec so that par_iter works and results stay in order
                                 let ivs: Vec<Interval<()>> = intervals
                                     .find(chunk_start as u32, chunk_end as u32)
-                                    .map(|iv| iv.clone())
+                                    // Truncate intervals that extend forward or backward of chunk in question
+                                    .map(|iv| Interval {
+                                        start: std::cmp::max(iv.start, chunk_start as u32),
+                                        stop: std::cmp::min(iv.stop, chunk_end as u32),
+                                        val: (),
+                                    })
                                     .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
+                                        info!("Processing {}:{}-{}", tid, iv.start, iv.stop);
                                         self.processor.process_region(
                                             tid,
                                             iv.start as usize,
