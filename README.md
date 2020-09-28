@@ -1,5 +1,8 @@
 ![Publish](https://github.com/sstadick/perbase/workflows/Publish/badge.svg)
 ![Rust](https://github.com/sstadick/perbase/workflows/Rust/badge.svg)
+[![Codecov](https://img.shields.io/codecov/c/github/sstadick/perbase/master.svg)](https://codecov.io/gh/sstadick/perbase)
+[![API docs](https://img.shields.io/badge/API-documentation-blue.svg)](https://docs.rs/perbase)
+[![Crates.io](https://img.shields.io/crates/d/varlociraptor.svg)](https://crates.io/crates/perbase)
 # perbase
 
 A highly parallelized utility for analyzing metrics at a per-base level.
@@ -10,6 +13,8 @@ If a metric is missing, or performance is lacking. Please file a bug/feature iss
 
 ```bash
 conda install -c bioconda -c conda-forge perbase
+# or
+cargo install perbase
 ```
 
 \* Check version, conda lags behind what you will find in the release page
