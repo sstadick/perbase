@@ -976,9 +976,12 @@ dependencies = [
 
 [[package]]
 name = "rust-lapper"
-version = "0.4.4"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "984492edbb17bbbb244f0607f1c9efc26e1cf0592a8d573c77d05f25a1910f81"
+checksum = "671c8279ea552170c539294d2d677e07da1a49ce05882b313dc1931bbade2062"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "rustc_version"
