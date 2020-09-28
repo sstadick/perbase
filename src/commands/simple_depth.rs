@@ -200,6 +200,7 @@ mod tests {
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use std::path::PathBuf;
+    use tempfile::{tempdir, TempDir};
 
     #[fixture]
     fn read_filter() -> SimpleReadFilter {
@@ -207,9 +208,12 @@ mod tests {
     }
 
     #[fixture]
-    fn bamfile() -> PathBuf {
-        // This keep the test bam up to date
-        let path = PathBuf::from("test/test.bam");
+    fn bamfile() -> (PathBuf, TempDir) {
+        // No longer - This keep the test bam up to date
+        // let test_path = PathBuf::from("test/test.bam");
+        let tempdir = tempdir().unwrap();
+        let path = tempdir.path().join("test.bam");
+
         // Build a header
         let mut header = bam::header::Header::new();
         let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
@@ -264,16 +268,16 @@ mod tests {
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
         }
-        path
+        (path, tempdir)
     }
 
     #[fixture]
     fn non_mate_aware_positions(
-        bamfile: PathBuf,
+        bamfile: (PathBuf, TempDir),
         read_filter: SimpleReadFilter,
     ) -> Vec<Vec<Position>> {
         // Extract bam into Positions
-        let mut reader = bam::Reader::from_path(&bamfile).expect("Opened bam for reading");
+        let mut reader = bam::Reader::from_path(&bamfile.0).expect("Opened bam for reading");
         let header = reader.header().to_owned();
         let mut positions = vec![vec![], vec![]];
         for p in reader.pileup() {
@@ -286,9 +290,9 @@ mod tests {
     }
 
     #[fixture]
-    fn mate_aware_positions(bamfile: PathBuf, read_filter: SimpleReadFilter) -> Vec<Vec<Position>> {
+    fn mate_aware_positions(bamfile: (PathBuf, TempDir), read_filter: SimpleReadFilter) -> Vec<Vec<Position>> {
         // Extract bam into Positions
-        let mut reader = bam::Reader::from_path(&bamfile).expect("Opened bam for reading");
+        let mut reader = bam::Reader::from_path(&bamfile.0).expect("Opened bam for reading");
         let header = reader.header().to_owned();
         let mut positions = vec![vec![], vec![]];
         for p in reader.pileup() {

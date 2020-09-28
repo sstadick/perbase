@@ -155,21 +155,21 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
                 let serial_step_size = self.chunksize * self.threads; // aka superchunk
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
-                    let tid_end = header.target_len(tid).unwrap() as usize;
+                    let tid_end = header.target_len(tid).unwrap() as u64;
                     // Result holds the processed positions to be sent to writer
                     let mut result = vec![];
                     for chunk_start in (0..tid_end).step_by(serial_step_size) {
-                        let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
+                        let chunk_end = std::cmp::min(chunk_start + serial_step_size as u64, tid_end);
                         info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
                         let (r, _) = rayon::join(
                             || {
                                 // Must be a vec so that par_iter works and results stay in order
-                                let ivs: Vec<Interval<()>> = intervals
-                                    .find(chunk_start as u32, chunk_end as u32)
+                                let ivs: Vec<Interval<u64, ()>> = intervals
+                                    .find(chunk_start, chunk_end)
                                     // Truncate intervals that extend forward or backward of chunk in question
                                     .map(|iv| Interval {
-                                        start: std::cmp::max(iv.start, chunk_start as u32),
-                                        stop: std::cmp::min(iv.stop, chunk_end as u32),
+                                        start: std::cmp::max(iv.start, chunk_start),
+                                        stop: std::cmp::min(iv.stop, chunk_end),
                                         val: (),
                                     })
                                     .collect();
@@ -206,15 +206,15 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     }
 
     // Convert the header into intervals of equally sized chunks. The last interval may be short.
-    fn header_to_intervals(header: &HeaderView, chunksize: usize) -> Result<Vec<Lapper<()>>> {
+    fn header_to_intervals(header: &HeaderView, chunksize: usize) -> Result<Vec<Lapper<u64, ()>>> {
         let mut intervals = vec![vec![]; header.target_count() as usize];
-        for tid in 0..(header.target_count() as usize) {
-            let tid_len = header.target_len(tid as u32).unwrap() as usize;
+        for tid in 0..(header.target_count()) {
+            let tid_len = header.target_len(tid).unwrap();
             for start in (0..tid_len).step_by(chunksize) {
-                let stop = std::cmp::min(start + chunksize, tid_len);
-                intervals[tid].push(Interval::<()> {
-                    start: start as u32,
-                    stop: stop as u32,
+                let stop = std::cmp::min(start + chunksize as u64, tid_len);
+                intervals[tid as usize].push(Interval {
+                    start: start,
+                    stop: stop,
                     val: (),
                 });
             }
@@ -225,7 +225,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     /// Read a bed file into a vector of lappers with the index representing the TID
     // TODO add a proper error message
     // TODO update rust_lapper to use u64
-    fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<()>>> {
+    fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];
         for record in bed_reader.records() {
@@ -233,9 +233,9 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
             let tid = header
                 .tid(record.chrom().as_bytes())
                 .expect("Chromosome not found in BAM/CRAM header");
-            intervals[tid as usize].push(Interval::<()> {
-                start: record.start() as u32,
-                stop: record.end() as u32,
+            intervals[tid as usize].push(Interval {
+                start: record.start(),
+                stop: record.end(),
                 val: (),
             });
         }
