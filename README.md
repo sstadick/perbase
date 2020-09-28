@@ -1,7 +1,7 @@
 ![Publish](https://github.com/sstadick/perbase/workflows/Publish/badge.svg)
 ![Rust](https://github.com/sstadick/perbase/workflows/Rust/badge.svg)
 [![API docs](https://img.shields.io/badge/API-documentation-blue.svg)](https://docs.rs/perbase)
-[![Crates.io](https://img.shields.io/crates/d/varlociraptor.svg)](https://crates.io/crates/perbase)
+[![Crates.io](https://img.shields.io/crates/d/perbase.svg)](https://crates.io/crates/perbase)
 # perbase
 
 A highly parallelized utility for analyzing metrics at a per-base level.
