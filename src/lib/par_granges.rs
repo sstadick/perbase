@@ -1,4 +1,4 @@
-//! # ParIO
+//! # ParGranges
 //!
 //! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
@@ -21,18 +21,24 @@ use termcolor::ColorChoice;
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
-    /// A vector of P make up the output of [RegionProcessor::process_region] and
+    /// A vector of P make up the output of [`process_region`] and
     /// are values associated with each position.
+    ///
+    /// [`process_region`]: #method.process_region
     type P: 'static + Send + Sync + Serialize;
 
     /// A function that takes the tid, start, and stop and returns something serializable.
     /// Note, a common use of this function will be a `fetch` -> `pileup`. The pileup must
     /// be bounds checked.
-    fn process_region(&self, tid: u32, start: usize, stop: usize) -> Vec<Self::P>;
+    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P>;
 }
 
+/// ParGranges holds all the information and configuration needed to launch the
+/// [`ParGranges::process`].
+///
+/// [`ParGranges::process`]: #method.process
 #[derive(Debug)]
-pub struct ParIO<R: 'static + RegionProcessor + Send + Sync> {
+pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     /// Path to an indexed BAM / CRAM file
     reads: PathBuf,
     /// Optional reference file for CRAM
@@ -51,7 +57,7 @@ pub struct ParIO<R: 'static + RegionProcessor + Send + Sync> {
     processor: R,
 }
 
-impl<R: RegionProcessor + Send + Sync> ParIO<R> {
+impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// Create a ParIO object
     ///
     /// # Arguments
@@ -62,7 +68,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
-    /// * `processor`- Something that implements [RegionProcessor]
+    /// * `processor`- Something that implements [`RegionProcessor`](RegionProcessor)
     pub fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -159,7 +165,8 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
                     // Result holds the processed positions to be sent to writer
                     let mut result = vec![];
                     for chunk_start in (0..tid_end).step_by(serial_step_size) {
-                        let chunk_end = std::cmp::min(chunk_start + serial_step_size as u64, tid_end);
+                        let chunk_end =
+                            std::cmp::min(chunk_start + serial_step_size as u64, tid_end);
                         info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
                         let (r, _) = rayon::join(
                             || {
@@ -176,11 +183,7 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
                                         info!("Processing {}:{}-{}", tid, iv.start, iv.stop);
-                                        self.processor.process_region(
-                                            tid,
-                                            iv.start as usize,
-                                            iv.stop as usize,
-                                        )
+                                        self.processor.process_region(tid, iv.start, iv.stop)
                                     })
                                     .collect()
                             },
@@ -224,7 +227,6 @@ impl<R: RegionProcessor + Send + Sync> ParIO<R> {
 
     /// Read a bed file into a vector of lappers with the index representing the TID
     // TODO add a proper error message
-    // TODO update rust_lapper to use u64
     fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];

@@ -1,6 +1,6 @@
 //! # Position
 //!
-//! A module for holding all the information about a given genomic position.
+//! A module for accumlating and serializing all information about a genomic position.
 use itertools::Itertools;
 use rust_htslib::bam::{
     self,
@@ -107,8 +107,8 @@ impl Position {
     ///
     /// # Arguments
     ///
-    /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
-    /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
+    /// * `pileup` - a pileup at a genomic position
+    /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
     pub fn from_pileup<F: ReadFilter>(
         pileup: Pileup,
@@ -138,8 +138,8 @@ impl Position {
     ///
     /// # Arguments
     ///
-    /// * `pileup` - a [bam::pileup::Pileup] at a genomic position
-    /// * `header` - a [bam::HeaderView] for the bam file being read, to get the sequence name
+    /// * `pileup` - a pileup at a genomic position
+    /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
     pub fn from_pileup_mate_aware<F: ReadFilter>(
         pileup: Pileup,

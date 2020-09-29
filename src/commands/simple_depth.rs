@@ -4,64 +4,61 @@
 //! as well as depth per nucleotide. Additionally counts the number of
 //! insertions / deletions at each position.
 use anyhow::Result;
-use argh::FromArgs;
 use log::*;
 use perbase_lib::{
-    par_io::{self, RegionProcessor},
+    par_granges::{self, RegionProcessor},
     position::{Position, ReadFilter},
     utils,
 };
 use rust_htslib::{bam, bam::record::Record, bam::Read};
 use std::path::PathBuf;
+use structopt::StructOpt;
 
-/// Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
-#[derive(FromArgs)]
-#[argh(subcommand, name = "simple-depth")]
+/// Calculate the depth at each base, per-nucleotide.
+#[derive(StructOpt)]
+#[structopt(author)]
 pub struct SimpleDepth {
-    /// input BAM/CRAM to analyze, must be indexed
-    #[argh(positional)]
+    /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
 
-    /// indexed reference fasta, set if using CRAM
-    #[argh(option, short = 'r')]
+    /// Indexed reference fasta, set if using CRAM.
+    #[structopt(long, short = "r")]
     ref_fasta: Option<PathBuf>,
 
-    /// a BED file containing regions of interest. If specified, only bases from the given regions will be reported on
-    #[argh(option, short = 'b')]
+    /// A BED file containing regions of interest. If specified, only bases from the given regions will be reported on.
+    #[structopt(long, short = "b")]
     bed_file: Option<PathBuf>,
 
-    /// output path. DEFAULT: stdout
-    #[argh(option, short = 'o')]
+    /// Output path, defaults to stdout.
+    #[structopt(long, short = "o")]
     output: Option<PathBuf>,
 
-    /// the number of threads to use. DEFAULT: max_available
-    #[argh(option, short = 't', default = "num_cpus::get()")]
+    /// The number of threads to use.
+    #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
     threads: usize,
 
-    /// the ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize
-    #[argh(option, short = 'c')]
-    chunksize: Option<usize>, // default set by par_io at 1_000_000
+    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
+    #[structopt(long, short = "c")]
+    chunksize: Option<usize>, // default set by par_granges at 1_000_000
 
-    /// SAM flags to include. DEFAULT: 0
-    #[argh(option, short = 'f', default = "0")]
+    /// SAM flags to include.
+    #[structopt(long, short = "f", default_value = "0")]
     include_flags: u16,
 
-    /// SAM flags to exclude, recommended 3848. DEFAULT: 0
-    #[argh(option, short = 'F', default = "0")]
+    /// SAM flags to exclude, recommended 3848.
+    #[structopt(long, short = "F", default_value = "0")]
     exclude_flags: u16,
 
-    // TODO: add to docs
-    /// fix overlapping mates counts, see docs for full details. DEAFAULT: off
-    #[argh(switch, short = 'm')]
+    /// Fix overlapping mates counts, see docs for full details.
+    #[structopt(long, short = "m")]
     mate_fix: bool,
 
-    /// minimum mapq for a read to count toward depth. DEFAULT: 0
-    #[argh(option, short = 'q', default = "0")]
+    /// Minimum MAPQ for a read to count toward depth.
+    #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
 }
 
 impl SimpleDepth {
-    // TODO: Add mate detection like sambamba
     pub fn run(self) -> Result<()> {
         info!("Running simple-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
@@ -75,7 +72,7 @@ impl SimpleDepth {
             read_filter,
         );
 
-        let par_io_runner = par_io::ParIO::new(
+        let par_granges_runner = par_granges::ParGranges::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.bed_file.clone(),
@@ -85,7 +82,7 @@ impl SimpleDepth {
             simple_processor,
         );
 
-        par_io_runner.process()?;
+        par_granges_runner.process()?;
         Ok(())
     }
 }
@@ -151,7 +148,7 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
-    fn process_region(&self, tid: u32, start: usize, stop: usize) -> Vec<Position> {
+    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Position> {
         info!("Processing region {}:{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
@@ -165,7 +162,7 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
         let header = reader.header().to_owned();
         // fetch the region of interest
         reader
-            .fetch(tid, start as u64, stop as u64)
+            .fetch(tid, start, stop)
             .expect("Fetched a region");
         // Walk over pileups
         let result: Vec<Position> = reader
@@ -173,7 +170,7 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
-                if (pileup.pos() as usize) >= start && (pileup.pos() as usize) < stop {
+                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
                     if self.mate_fix {
                         Some(Position::from_pileup_mate_aware(
                             pileup,
@@ -290,7 +287,10 @@ mod tests {
     }
 
     #[fixture]
-    fn mate_aware_positions(bamfile: (PathBuf, TempDir), read_filter: SimpleReadFilter) -> Vec<Vec<Position>> {
+    fn mate_aware_positions(
+        bamfile: (PathBuf, TempDir),
+        read_filter: SimpleReadFilter,
+    ) -> Vec<Vec<Position>> {
         // Extract bam into Positions
         let mut reader = bam::Reader::from_path(&bamfile.0).expect("Opened bam for reading");
         let header = reader.header().to_owned();

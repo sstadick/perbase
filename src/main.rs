@@ -1,20 +1,21 @@
 extern crate perbase_lib;
 pub mod commands;
 use anyhow::Result;
-use argh::FromArgs;
+// use argh::FromArgs;
 use commands::*;
 use env_logger::Env;
 use log::*;
+use structopt::StructOpt;
 
-#[derive(FromArgs)]
+#[derive(StructOpt)]
+#[structopt(rename_all = "kebab-case", author, about)]
 /// Commands for generating per-base analysis
 struct Args {
-    #[argh(subcommand)]
+    #[structopt(subcommand)]
     subcommand: Subcommand,
 }
 
-#[derive(FromArgs)]
-#[argh(subcommand)]
+#[derive(StructOpt)]
 enum Subcommand {
     SimpleDepth(simple_depth::SimpleDepth),
 }
@@ -30,7 +31,7 @@ impl Subcommand {
 
 fn main() -> Result<()> {
     env_logger::from_env(Env::default().default_filter_or("info")).init();
-    if let Err(err) = argh::from_env::<Args>().subcommand.run() {
+    if let Err(err) = Args::from_args().subcommand.run() {
         error!("{}", err);
         std::process::exit(1);
     }
