@@ -7,13 +7,13 @@
 
 A highly parallelized utility for analyzing metrics at a per-base level.
 
-If a metric is missing, or performance is lacking. Please file a bug/feature issue. This tool aims to improve upon [`bam-readcount`](https://github.com/genome/bam-readcount).
+If a metric is missing, or performance is lacking. Please file a bug/feature ticket in issues.
 
 ## Installation
 
 ```bash
-conda install -c bioconda -c conda-forge perbase
-# or
+conda install -c bioconda perbase
+# or via the rust toolchain
 cargo install perbase
 ```
 

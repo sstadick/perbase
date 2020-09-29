@@ -1,5 +1,6 @@
-/// General utility methods
+//! General utility methods.
 use anyhow::{Error, Result};
+use lazy_static::lazy_static;
 use log::*;
 use num_cpus;
 use rayon;
@@ -25,4 +26,9 @@ pub fn determine_allowed_cpus(desired: usize) -> Result<usize> {
     } else {
         Ok(desired)
     }
+}
+
+lazy_static! {
+    /// Return the number of cpus as an &str
+    pub static ref NUM_CPU: String = num_cpus::get().to_string();
 }
