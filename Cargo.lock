@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "perbase"
-version = "0.3.7-alpha.0"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "bio",
