@@ -3,21 +3,14 @@
 //! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
 use bio::io::bed;
-use crossbeam::channel::unbounded;
-use grep_cli::stdout;
+use crossbeam::channel::{unbounded, Receiver};
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
 use rust_htslib::bam::{HeaderView, IndexedReader, Read};
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-    thread,
-};
-use termcolor::ColorChoice;
+use std::{path::PathBuf, thread};
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -45,15 +38,13 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     ref_fasta: Option<PathBuf>,
     /// Optional path to a BED file to restrict the regions iterated over
     regions_bed: Option<PathBuf>,
-    /// Optional path to an output file, STDOUT will be used if None
-    output_file: Option<PathBuf>,
     /// Number of threads this is allowed to use, uses all if None
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
     chunksize: usize,
     /// The rayon threadpool to operate in
     pool: rayon::ThreadPool,
-    /// The implementaiton of [RegionProcessor] that will be used to process regions
+    /// The implementation of [RegionProcessor] that will be used to process regions
     processor: R,
 }
 
@@ -73,7 +64,6 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         regions_bed: Option<PathBuf>,
-        output_file: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
         processor: R,
@@ -102,7 +92,6 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             reads,
             ref_fasta,
             regions_bed,
-            output_file,
             threads,
             chunksize,
             pool,
@@ -110,33 +99,21 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         }
     }
 
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output_file {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
-    }
-
     /// Process each region.
     ///
     /// This method splits the sequences in the BAM/CRAM header into `chunksize` * `self.threads` regions (aka 'super chunks').
     /// It then queries that 'super chunk' against the intervals (either the BED file, or the whole genome broken up into `chunksize`
     /// regions). The results of that query are then processed by a pool of workers that apply `process_region` to reach interval to
-    /// do perbase analysis on.
+    /// do perbase analysis on. The collected result for each region is then sent back over the returned `Receiver<R::P>` channel
+    /// for the caller to use. The results will be returned in order according to the order of the intervals used to drive this method.
     ///
     /// While one 'super chunk' is being worked on by all workers, the last 'super chunks' results are being printed to either to
     /// a file or to STDOUT, in order.
     ///
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
-    pub fn process(self) -> Result<()> {
-        let mut writer = self.get_writer()?;
+    pub fn process(self) -> Result<Receiver<R::P>> {
+        // let mut writer = self.get_writer()?;
 
         let (snd, rxv) = unbounded();
         thread::spawn(move || {
@@ -202,10 +179,10 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 }
             });
         });
-        rxv.into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
-        writer.flush()?;
-        Ok(())
+        // rxv.into_iter()
+        //     .for_each(|pos| writer.serialize(pos).unwrap());
+        // writer.flush()?;
+        Ok(rxv)
     }
 
     // Convert the header into intervals of equally sized chunks. The last interval may be short.
@@ -252,3 +229,15 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             .collect())
     }
 }
+
+// #[cfg(test)]
+// mod test {
+//     use super::*;
+    // The purpose of these tests is to demonstrate that positions are covered once under a variety of circumstances
+
+    // Variables
+    // - chunksize
+    // - number of cpus
+    // - number of intervals
+    //
+// }
