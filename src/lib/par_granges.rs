@@ -57,7 +57,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `ref_fasta`- path to an indexed reference file for CRAM
     /// * `regions_bed`- Optional BED file path restricting the regions to be examined
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
-    /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
+    /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
     /// * `processor`- Something that implements [`RegionProcessor`](RegionProcessor)
     pub fn new(
@@ -230,14 +230,62 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     }
 }
 
-// #[cfg(test)]
-// mod test {
-//     use super::*;
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proptest::prelude::*;
+    use rust_htslib::bam;
+    use bio::io::bed;
+    use rust_lapper::{Interval};
     // The purpose of these tests is to demonstrate that positions are covered once under a variety of circumstances
 
     // Variables
     // - chunksize
     // - number of cpus
     // - number of intervals
-    //
-// }
+
+    prop_compose! {
+        fn arb_iv_start(max_iv: usize)(start in 0..max_iv/2) -> usize { start }
+    }
+    prop_compose! {
+        fn arb_iv_stop(max_iv: usize)(stop in max_iv/2..max_iv) -> usize { stop }
+    }
+    prop_compose! {
+        // Create an arbitrary interval where the min size == max_iv / 2
+        // TODO: make minsize smaller
+        fn arb_iv(max_iv: usize)(start in arb_iv_start(max_iv), stop in arb_iv_stop(max_iv)) -> Interval<usize, ()> {
+            Interval {start, stop, val: ()}
+        }
+    }
+    // Create an arbitrary number of intervals along with the expected number of positions they cover
+    fn arb_ivs(max_iv: usize, max_ivs: usize) -> impl Strategy<Value = (Vec<Interval<usize, ()>>, usize)> {
+        prop::collection::vec(arb_iv(max_iv), 0..max_ivs).prop_map(|vec| {
+            let mut expected = 0;
+            for iv in vec.iter() {
+                expected += iv.stop - iv.start;
+            }
+            (vec, expected)
+        })
+    }
+    // Create arbitrary number of contigs with arbitrary intervals each
+    fn arb_chrs(max_chr: usize, max_iv: usize, max_ivs: usize) -> impl Strategy<Value = Vec<(Vec<Interval<usize, ()>>, usize)>> {
+        prop::collection::vec(arb_ivs(max_iv, max_ivs), 0..max_chr)
+    }
+    // An empty BAM with correct header
+    // A BED file with the randomly generated intervals (with expected number of positions)
+    // proptest generate random chunksize, cpus
+    proptest! {
+        #[test]
+        // add random chunksize and random cpus
+        fn interval_set(chromosmes in arb_chrs(50, 5_000_000, 10_000), chunksize in any::<usize>(), cpus in any::<usize>()) {
+            // Write a bam file with info
+            // Write a bed file with info
+            // Create the processor with a dumb impl of procesing that just returns posiotns with no counting
+            // Validate that for each chr we get the expected number of bases
+
+
+            println!("{:?} - {:?}", ivs, expected );
+            assert!(false);
+        }
+    }
+}
