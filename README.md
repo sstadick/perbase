@@ -19,6 +19,8 @@ cargo install perbase
 
 \* Check version, conda lags behind what you will find in the release page
 
+You can also download a binary from the [releases](https://github.com/sstadick/perbase/releases) page.
+
 ## Tools
 
 ### simple-depth
