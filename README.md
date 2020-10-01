@@ -1,5 +1,5 @@
 <p align="center">
-<img width="250" height="250" src="./perbase.png">
+<img width="500" height="250" src="./perbase.png">
 </p>
 
 ![Publish](https://github.com/sstadick/perbase/workflows/Publish/badge.svg)
