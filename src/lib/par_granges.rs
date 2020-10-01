@@ -3,21 +3,14 @@
 //! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
 use bio::io::bed;
-use crossbeam::channel::unbounded;
-use grep_cli::stdout;
+use crossbeam::channel::{unbounded, Receiver};
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
 use rust_htslib::bam::{HeaderView, IndexedReader, Read};
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-    thread,
-};
-use termcolor::ColorChoice;
+use std::{path::PathBuf, thread};
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -45,15 +38,13 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     ref_fasta: Option<PathBuf>,
     /// Optional path to a BED file to restrict the regions iterated over
     regions_bed: Option<PathBuf>,
-    /// Optional path to an output file, STDOUT will be used if None
-    output_file: Option<PathBuf>,
     /// Number of threads this is allowed to use, uses all if None
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
     chunksize: usize,
     /// The rayon threadpool to operate in
     pool: rayon::ThreadPool,
-    /// The implementaiton of [RegionProcessor] that will be used to process regions
+    /// The implementation of [RegionProcessor] that will be used to process regions
     processor: R,
 }
 
@@ -66,14 +57,13 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `ref_fasta`- path to an indexed reference file for CRAM
     /// * `regions_bed`- Optional BED file path restricting the regions to be examined
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
-    /// * `chunksize`- optional agrgument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
+    /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
     /// * `processor`- Something that implements [`RegionProcessor`](RegionProcessor)
     pub fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         regions_bed: Option<PathBuf>,
-        output_file: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
         processor: R,
@@ -102,7 +92,6 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             reads,
             ref_fasta,
             regions_bed,
-            output_file,
             threads,
             chunksize,
             pool,
@@ -110,33 +99,21 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         }
     }
 
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output_file {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
-    }
-
     /// Process each region.
     ///
     /// This method splits the sequences in the BAM/CRAM header into `chunksize` * `self.threads` regions (aka 'super chunks').
     /// It then queries that 'super chunk' against the intervals (either the BED file, or the whole genome broken up into `chunksize`
     /// regions). The results of that query are then processed by a pool of workers that apply `process_region` to reach interval to
-    /// do perbase analysis on.
+    /// do perbase analysis on. The collected result for each region is then sent back over the returned `Receiver<R::P>` channel
+    /// for the caller to use. The results will be returned in order according to the order of the intervals used to drive this method.
     ///
     /// While one 'super chunk' is being worked on by all workers, the last 'super chunks' results are being printed to either to
     /// a file or to STDOUT, in order.
     ///
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
-    pub fn process(self) -> Result<()> {
-        let mut writer = self.get_writer()?;
+    pub fn process(self) -> Result<Receiver<R::P>> {
+        // let mut writer = self.get_writer()?;
 
         let (snd, rxv) = unbounded();
         thread::spawn(move || {
@@ -158,7 +135,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 };
 
                 // The number positions to try to process in one batch
-                let serial_step_size = self.chunksize * self.threads; // aka superchunk
+                let serial_step_size = self.chunksize.checked_mul(self.threads).unwrap_or(usize::MAX); // aka superchunk
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
                     let tid_end = header.target_len(tid).unwrap() as u64;
@@ -202,10 +179,10 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 }
             });
         });
-        rxv.into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
-        writer.flush()?;
-        Ok(())
+        // rxv.into_iter()
+        //     .for_each(|pos| writer.serialize(pos).unwrap());
+        // writer.flush()?;
+        Ok(rxv)
     }
 
     // Convert the header into intervals of equally sized chunks. The last interval may be short.
@@ -250,5 +227,140 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 lapper
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use bio::io::bed;
+    use proptest::prelude::*;
+    use rust_htslib::bam;
+    use rust_lapper::{Interval, Lapper};
+    use tempfile::tempdir;
+    use std::collections::HashMap;
+    use num_cpus;
+    // The purpose of these tests is to demonstrate that positions are covered once under a variety of circumstances
+
+    prop_compose! {
+        fn arb_iv_start(max_iv: u64)(start in 0..max_iv/2) -> u64 { start }
+    }
+    prop_compose! {
+        fn arb_iv_size(max_iv: u64)(size in 0..max_iv/2) -> u64 { size }
+    }
+    prop_compose! {
+        // Create an arbitrary interval where the min size == max_iv / 2
+        fn arb_iv(max_iv: u64)(start in arb_iv_start(max_iv), size in arb_iv_size(max_iv)) -> Interval<u64, ()> {
+            Interval {start, stop: start + size, val: ()}
+        }
+    }
+    // Create an arbitrary number of intervals along with the expected number of positions they cover
+    fn arb_ivs(
+        max_iv: u64, // max iv size
+        max_ivs: usize, // max number of intervals
+    ) -> impl Strategy<Value = (Vec<Interval<u64, ()>>, u64, u64)> {
+        prop::collection::vec(arb_iv(max_iv), 0..max_ivs).prop_map(|vec| {
+            let mut furthest_right = 0;
+            let lapper = Lapper::new(vec.clone());
+            let expected = lapper.cov();
+            for iv in vec.iter() {
+                if iv.stop > furthest_right {
+                    furthest_right = iv.stop;
+                }
+            }
+            (vec, expected, furthest_right)
+        })
+    }
+    // Create arbitrary number of contigs with arbitrary intervals each
+    fn arb_chrs(
+        max_chr: usize, // number of chromosomes to use
+        max_iv: u64, // max interval size
+        max_ivs: usize, // max number of intervals
+    ) -> impl Strategy<Value = Vec<(Vec<Interval<u64, ()>>, u64, u64)>> {
+        prop::collection::vec(arb_ivs(max_iv, max_ivs), 0..max_chr)
+    }
+    // An empty BAM with correct header
+    // A BED file with the randomly generated intervals (with expected number of positions)
+    // proptest generate random chunksize, cpus
+    proptest! {
+        #[test]
+        // add random chunksize and random cpus
+        // NB: using any larger numbers for this tends to blow up the test runtime
+        fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>()) {
+            let tempdir = tempdir().unwrap();
+            let bam_path = tempdir.path().join("test.bam");
+            let bed_path = tempdir.path().join("test.bed");
+
+            // Build a BAM
+            let mut header = bam::header::Header::new();
+            for (i,chr) in chromosomes.iter().enumerate() {
+                let mut chr_rec = bam::header::HeaderRecord::new(b"SQ");
+                chr_rec.push_tag(b"SN", &i.to_string());
+                chr_rec.push_tag(b"LN", &chr.2.to_string()); // set len as max observed
+                header.push_record(&chr_rec);
+            }
+            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::BAM).expect("Opened test.bam for writing");
+            drop(writer); // force flush the writer so the header info is written
+            bam::index::build(&bam_path, None, bam::index::Type::BAI, 1).unwrap();
+
+            // Build a bed
+            let mut writer = bed::Writer::to_file(&bed_path).expect("Opened test.bed for writing");
+            for (i, chr) in chromosomes.iter().enumerate() {
+                for iv in chr.0.iter() {
+                    let mut record = bed::Record::new();
+                    record.set_start(iv.start);
+                    record.set_end(iv.stop);
+                    record.set_chrom(&i.to_string());
+                    record.set_score(&0.to_string());
+                    writer.write(&record).expect("Wrote to test.bed");
+                }
+            }
+            drop(writer); // force flush
+            // Create the processor with a dumb impl of processing that just returns positions with no counting
+            let test_processor = TestProcessor {};
+            let par_granges_runner = ParGranges::new(
+                bam_path,
+                None,
+                if use_bed { Some(bed_path) } else { None }, // do one with regions
+                Some(cpus),
+                Some(chunksize),
+                test_processor
+            );
+            let receiver = par_granges_runner.process().expect("Launch ParGranges Process");
+            let mut chrom_counts = HashMap::new();
+            receiver.into_iter().for_each(|p: Position| {
+                let positions = chrom_counts.entry(p.ref_seq.parse::<usize>().expect("parsed chr")).or_insert(0u64);
+                *positions += 1
+            });
+
+            // Validate that for each chr we get the expected number of bases
+            for (chrom, positions) in chrom_counts.iter() {
+                if use_bed {
+                    // if this was with bed, should be equal to .1
+                    prop_assert_eq!(chromosomes[*chrom].1, *positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].1, positions);
+                } else {
+                    // if this was bam only, should be equal to rightmost postion
+                    prop_assert_eq!(chromosomes[*chrom].2, *positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].2, positions);
+                }
+            }
+
+        }
+    }
+
+    use crate::position::Position;
+    use smartstring::SmartString;
+    struct TestProcessor {}
+    impl RegionProcessor for TestProcessor {
+        type P = Position;
+
+        fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
+            let mut results = vec![];
+            for i in start..stop {
+                let chr = SmartString::from(&tid.to_string());
+                let pos = Position::new(chr, i as usize);
+                results.push(pos);
+            }
+            results
+        }
     }
 }

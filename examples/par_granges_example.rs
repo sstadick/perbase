@@ -7,27 +7,27 @@ use perbase_lib::{
 use rust_htslib::bam::{self, record::Record, Read};
 use std::path::PathBuf;
 
-// To use ParGranges you will need to implement a [par_granges::RegionProcessor],
-// which requires a single method [par_granges::RegionProcessor::process_region]
-// and an associated type P, which is type of the values returned in the Vec by
-// `process_region`. The returned `P` objects will be kept in order and serialized
-// to the specified output.
+// To use ParGranges you will need to implement a [`RegionProcessor`](par_granges::RegionProcessor),
+// which requires a single method [`RegionProcessor::process_region`](par_granges::RegionProcessor::process_region)
+// and an associated type P, which is the type of the values returned in the Vec by
+// `process_region`. The returned `P` objects will be kept in order and accessible on the
+// receiver channel returned by the `[ParGranges::process`](par_granges::ParGranges::process) method.
 struct BasicProcessor<F: ReadFilter> {
     // An indexed bamfile to query for the region we were passed
     bamfile: PathBuf,
-    // This is an object that implements [position::ReadFilter] and will be applied to
+    // This is an object that implements `position::ReadFilter` and will be applied to
     // each read
     read_filter: F,
 }
 
-// A struct that will hold or filter info and impl ReadFilter
+// A struct that holds the filter values that will be used to implement `ReadFilter`
 struct BasicReadFilter {
     include_flags: u16,
     exclude_flags: u16,
     min_mapq: u8,
 }
 
-// The actual implementation of a read filter
+// The actual implementation of `ReadFilter`
 impl ReadFilter for BasicReadFilter {
     // Filter reads based SAM flags and mapping quality, true means pass
     #[inline]
@@ -39,6 +39,7 @@ impl ReadFilter for BasicReadFilter {
     }
 }
 
+// Implementation of the `RegionProcessor` trait to process each region
 impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
     type P = Position;
 
@@ -85,14 +86,19 @@ fn main() -> Result<()> {
         PathBuf::from("test/test.bam"),       // pass in bam
         None,                                 // optional ref fasta
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
-        None,                                 // optional output file, will use stdout outherwise
         None,                                 // optional allowed number of threads, defaults to max
         None,                                 // optional chunksize modification
         basic_processor,
     );
 
     // Run the processor
-    par_granges_runner.process()?;
+    let receiver = par_granges_runner.process()?;
+    // Pull the in-order results from the receiver channel
+    receiver.into_iter().for_each(|p: Position| {
+        // Note that the returned values are required to be `serde::Serialize`, so more fancy things
+        // than just debug printing are doable.
+        println!("{:?}", p);
+    });
 
     Ok(())
 }
