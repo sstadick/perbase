@@ -323,7 +323,6 @@ mod tests {
             let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
             pos.push(p)
         });
-        dbg!(&positions);
         positions
     }
 
@@ -354,7 +353,6 @@ mod tests {
             let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
             pos.push(p)
         });
-        dbg!(&positions);
         positions
     }
 
@@ -409,7 +407,6 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
-        dbg!(&positions.get("chr1").unwrap());
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
         assert_eq!(positions.get("chr1").unwrap()[4].depth, 2);
         assert_eq!(positions.get("chr1").unwrap()[9].depth, 3);
