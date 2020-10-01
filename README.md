@@ -1,3 +1,7 @@
+<p align="center">
+<img width="250" height="250" src="./perbase.png">
+</p>
+
 ![Publish](https://github.com/sstadick/perbase/workflows/Publish/badge.svg)
 ![Rust](https://github.com/sstadick/perbase/workflows/Rust/badge.svg)
 [![API docs](https://img.shields.io/badge/API-documentation-blue.svg)](https://docs.rs/perbase)
