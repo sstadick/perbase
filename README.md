@@ -3,11 +3,18 @@
 [![API docs](https://img.shields.io/badge/API-documentation-blue.svg)](https://docs.rs/perbase)
 [![Crates.io](https://img.shields.io/crates/v/perbase.svg)](https://crates.io/crates/perbase)
 [![Conda](https://anaconda.org/anaconda/anaconda/badges/installer/conda.svg)](https://anaconda.org/bioconda/perbase)
+
 # perbase
 
 A highly parallelized utility for analyzing metrics at a per-base level.
 
 If a metric is missing, or performance is lacking. Please file a bug/feature ticket in issues.
+
+## Why?
+
+Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute that you have available. Additionally, `perbase` aims to be more accurate than other tools. EX: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does.
+
+Lastly, to the best of my knowledge, `perbase` offers the fastest mate-fix aware version of all algorithms. This is again due more to its highly concurrent nature than to any algorithmic improvement to mate detection.
 
 ## Installation
 
