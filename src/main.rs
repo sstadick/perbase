@@ -18,12 +18,14 @@ struct Args {
 #[derive(StructOpt)]
 enum Subcommand {
     SimpleDepth(simple_depth::SimpleDepth),
+    OnlyDepth(only_depth::OnlyDepth)
 }
 
 impl Subcommand {
     fn run(self) -> Result<()> {
         match self {
             Subcommand::SimpleDepth(x) => x.run()?,
+            Subcommand::OnlyDepth(x) => x.run()?
         }
         Ok(())
     }
