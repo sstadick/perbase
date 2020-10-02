@@ -3,7 +3,6 @@
 //! Calculates the depth only at each position. This uses the same algorithm described in
 //! the [`mosdepth`](https://academic.oup.com/bioinformatics/article/doi/10.1093/bioinformatics/btx699/4583630?guestAccessKey=35b55064-4566-4ab3-a769-32916fa1c6e6)
 //! paper.
-use crate::SimpleReadFilter;
 use anyhow::Result;
 use csv;
 use grep_cli::stdout;
@@ -13,7 +12,7 @@ use perbase_lib::{
     position::{Position, ReadFilter},
     utils,
 };
-use rust_htslib::{bam, bam::record::Record, bam::Read};
+use rust_htslib::{bam, bam::record::Cigar, bam::record::Record, bam::Read};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -188,27 +187,107 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
         let header = reader.header().to_owned();
         // fetch the region of interest
         reader.fetch(tid, start, stop).expect("Fetched a region");
-        // Walk over pileups
-        let result: Vec<Position> = reader
-            .pileup()
-            .flat_map(|p| {
-                let pileup = p.expect("Extracted a pileup");
-                // Verify that we are within the bounds of the chunk we are iterating on
-                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-                    if self.mate_fix {
-                        Some(Position::from_pileup_mate_aware(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                        ))
+
+        let mut counts: Vec<i32> = vec![0; (stop - start) as usize];
+
+        // Walk over the reads
+        reader
+            .records()
+            .map(|r| r.expect("Read a record"))
+            .filter(|r| self.read_filter.filter_read(r))
+            .for_each(|r| {
+                // start and end within bounds and accounting for cigar ops
+                let cigar = r.cigar();
+                let mut skip = false;
+                let read_pos = r.pos() as usize; // TODO: this seems like an usafe `as`
+                                                 // get offset into the read based on region start stop
+                let mut read_offset = if read_pos < (start as usize) {
+                    if let Some(start) = cigar
+                        .read_pos(start as u32, false, false)
+                        .expect("Found start in read")
+                    {
+                        start
                     } else {
-                        Some(Position::from_pileup(pileup, &header, &self.read_filter))
+                        // TODO: skip this read
+                        0
                     }
                 } else {
-                    None
+                    0
+                };
+                // need something like a seen start / seen end
+                // consume cigar postions, marking as we go
+                let mut chunk_start = false;
+                let mut chunk_end = false;
+                // think about not going over the read length...don't even use seqlen, just go based off of cigar ops / length
+                while read_offset + read_pos < r.seq_len() && read_offset + read_pos < stop {
+                    match cigar[read_offset] {
+                        // Only inc read offset on ref consumers
+                        // add a var for tracking in-cigar position... so three counter
+                        // ref_pos, query_pos, cigar_pos
+                        // refconsuming and not breaking
+                        // refconsuming and breaking (REF_SKIP)
+                        // nonrefconsuming (not breaking)
+
+                        // refconsuming and not breaking
+                        Cigar::Match(_) | Cigar::Diff(_) | Cigar::Equal(_) => {
+                            // consume cigar, incr the overall position
+                            if !chunk_start {
+                                chunk_start = true;
+                                chunk_end = false;
+                                counts[(read_offset + read_pos) - start as usize] += 1;
+                            }
+                        }
+                        // non-ref consuming and not breaking
+                        Cigar::Ins(_) | Cigar::SoftClip(_) => {
+                            // consume the cigar, don't incr the overall position
+                        }
+                        // ref-consuming and breaking
+                        Cigar::RefSkip(_) => {
+                            // consume the cigar, incr the overall position
+                            if !chunk_end {
+                                chunk_end = true;
+                                chunk_start = false;
+                                counts[(read_offset + read_pos) - start as usize] -= 1;
+                            }
+                        }
+                        // no-ops
+                        Cigar::Pad(_) | Cigar::HardClip(_) => {
+                            // consume cigar and do nothing else
+                        }
+                        _ => unreachable!(),
+                    }
+                    read_offset += 1;
                 }
-            })
-            .collect();
+                // set the last position if we didn't end already
+                if !chunk_end {
+                    counts[(read_offset + read_pos) - start as usize] -= 1;
+                }
+
+                info!("{:?}", r);
+            });
+
+        // Walk over pileups
+        // let result: Vec<Position> = reader
+        //     .pileup()
+        //     .flat_map(|p| {
+        //         let pileup = p.expect("Extracted a pileup");
+        //         // Verify that we are within the bounds of the chunk we are iterating on
+        //         if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
+        //             if self.mate_fix {
+        //                 Some(Position::from_pileup_mate_aware(
+        //                     pileup,
+        //                     &header,
+        //                     &self.read_filter,
+        //                 ))
+        //             } else {
+        //                 Some(Position::from_pileup(pileup, &header, &self.read_filter))
+        //             }
+        //         } else {
+        //             None
+        //         }
+        //     })
+        //     .collect();
+        let result: Vec<Position> = vec![];
         result
     }
 }
