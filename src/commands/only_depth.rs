@@ -6,14 +6,25 @@
 use anyhow::Result;
 use csv;
 use grep_cli::stdout;
+use itertools::Itertools;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{Position, ReadFilter},
+    position::ReadFilter,
     utils,
 };
-use rust_htslib::{bam, bam::record::Cigar, bam::record::Record, bam::Read};
+use rust_htslib::{
+    bam,
+    bam::pileup::{Alignment, Pileup},
+    bam::record::Cigar,
+    bam::record::Record,
+    bam::Read,
+};
+use serde::Serialize;
+use smartstring::alias::String;
 use std::{
+    cmp::Ordering,
+    default,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -168,12 +179,13 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 /// Implement [par_io::RegionProcessor] for [SimpleProcessor]
 impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
     /// Objects of [position::Position] will be returned by each call to [SimpleProcessor::process_region]
-    type P = Position;
+    type P = OnlyDepthPosition;
 
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Position> {
+    // TODO: make `Position` a trait that can be implemented for each new depth tester
+    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<OnlyDepthPosition> {
         info!("Processing region {}:{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
@@ -187,108 +199,212 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
         let header = reader.header().to_owned();
         // fetch the region of interest
         reader.fetch(tid, start, stop).expect("Fetched a region");
-
-        let mut counts: Vec<i32> = vec![0; (stop - start) as usize];
-
-        // Walk over the reads
-        reader
-            .records()
-            .map(|r| r.expect("Read a record"))
-            .filter(|r| self.read_filter.filter_read(r))
-            .for_each(|r| {
-                // start and end within bounds and accounting for cigar ops
-                let cigar = r.cigar();
-                let mut skip = false;
-                let read_pos = r.pos() as usize; // TODO: this seems like an usafe `as`
-                                                 // get offset into the read based on region start stop
-                let mut read_offset = if read_pos < (start as usize) {
-                    if let Some(start) = cigar
-                        .read_pos(start as u32, false, false)
-                        .expect("Found start in read")
-                    {
-                        start
+        // Walk over pileups
+        let result: Vec<OnlyDepthPosition> = reader
+            .pileup()
+            .flat_map(|p| {
+                let pileup = p.expect("Extracted a pileup");
+                // Verify that we are within the bounds of the chunk we are iterating on
+                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
+                    if self.mate_fix {
+                        Some(OnlyDepthPosition::from_pileup_mate_aware(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                        ))
                     } else {
-                        // TODO: skip this read
-                        0
+                        Some(OnlyDepthPosition::from_pileup(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                        ))
                     }
                 } else {
-                    0
-                };
-                // need something like a seen start / seen end
-                // consume cigar postions, marking as we go
-                let mut chunk_start = false;
-                let mut chunk_end = false;
-                // think about not going over the read length...don't even use seqlen, just go based off of cigar ops / length
-                while read_offset + read_pos < r.seq_len() && read_offset + read_pos < stop {
-                    match cigar[read_offset] {
-                        // Only inc read offset on ref consumers
-                        // add a var for tracking in-cigar position... so three counter
-                        // ref_pos, query_pos, cigar_pos
-                        // refconsuming and not breaking
-                        // refconsuming and breaking (REF_SKIP)
-                        // nonrefconsuming (not breaking)
-
-                        // refconsuming and not breaking
-                        Cigar::Match(_) | Cigar::Diff(_) | Cigar::Equal(_) => {
-                            // consume cigar, incr the overall position
-                            if !chunk_start {
-                                chunk_start = true;
-                                chunk_end = false;
-                                counts[(read_offset + read_pos) - start as usize] += 1;
-                            }
-                        }
-                        // non-ref consuming and not breaking
-                        Cigar::Ins(_) | Cigar::SoftClip(_) => {
-                            // consume the cigar, don't incr the overall position
-                        }
-                        // ref-consuming and breaking
-                        Cigar::RefSkip(_) => {
-                            // consume the cigar, incr the overall position
-                            if !chunk_end {
-                                chunk_end = true;
-                                chunk_start = false;
-                                counts[(read_offset + read_pos) - start as usize] -= 1;
-                            }
-                        }
-                        // no-ops
-                        Cigar::Pad(_) | Cigar::HardClip(_) => {
-                            // consume cigar and do nothing else
-                        }
-                        _ => unreachable!(),
-                    }
-                    read_offset += 1;
+                    None
                 }
-                // set the last position if we didn't end already
-                if !chunk_end {
-                    counts[(read_offset + read_pos) - start as usize] -= 1;
-                }
-
-                info!("{:?}", r);
-            });
-
-        // Walk over pileups
-        // let result: Vec<Position> = reader
-        //     .pileup()
-        //     .flat_map(|p| {
-        //         let pileup = p.expect("Extracted a pileup");
-        //         // Verify that we are within the bounds of the chunk we are iterating on
-        //         if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-        //             if self.mate_fix {
-        //                 Some(Position::from_pileup_mate_aware(
-        //                     pileup,
-        //                     &header,
-        //                     &self.read_filter,
-        //                 ))
-        //             } else {
-        //                 Some(Position::from_pileup(pileup, &header, &self.read_filter))
-        //             }
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .collect();
-        let result: Vec<Position> = vec![];
+            })
+            .collect();
         result
+    }
+}
+
+pub struct IterStartStops {
+    // offset into the read ref positions to start at
+    offset: usize,
+    // hardstop ref positon in reead to stop at
+    hardstop: usize,
+    // index into the cigar string
+    cigar_index: usize,
+    // vec of cigar ops
+    cigar: Vec<Cigar>,
+}
+
+impl IterStartStops {
+    fn new(cigar: Vec<Cigar>, offset: usize, hardstop: usize) -> Self {
+        IterStartStops {
+            cigar_index: 0,
+            hardstop,
+            offset,
+            cigar,
+        }
+    }
+}
+
+/// Iterator over the start-stop pairs given a cigar string and a position offset
+impl Iterator for IterStartStops {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.cigar_index < self.cigar.len() {
+            let mut start = self.offset;
+            let mut ref_consumed = 0;
+            let entry = self.cigar[self.cigar_index];
+            match entry {
+                // refconsuming and not breaking
+                Cigar::Match(olen) | Cigar::Diff(olen) | Cigar::Equal(olen) | Cigar::Del(olen) => {
+                    ref_consumed += olen as usize
+                }
+                // non-ref consuming and not breaking
+                Cigar::Ins(_) | Cigar::SoftClip(_) => (),
+                // ref-consuming and breaking
+                Cigar::RefSkip(olen) => {
+                    let stop = start + ref_consumed + olen as usize;
+                    let result = (start, stop);
+                    self.offset = stop;
+                    self.cigar_index += 1;
+                    return Some(result);
+                }
+                // no-ops
+                Cigar::Pad(_) | Cigar::HardClip(_) => (),
+                _ => unreachable!(),
+            }
+            self.cigar_index += 1;
+        }
+        None
+    }
+}
+
+/// Hold all information about a position.
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub struct OnlyDepthPosition {
+    /// Reference sequence name.
+    #[serde(rename = "REF")]
+    pub ref_seq: String,
+    /// 1-based position in the sequence.
+    pub pos: usize,
+    /// Total depth at this position.
+    pub depth: usize,
+}
+
+impl OnlyDepthPosition {
+    pub fn new(ref_seq: String, pos: usize) -> Self {
+        Self {
+            ref_seq,
+            pos,
+            ..default::Default::default()
+        }
+    }
+
+    /// Given a record, update the counts at this position
+    fn update<F: ReadFilter>(&mut self, alignment: &Alignment, record: Record, read_filter: &F) {
+        if !read_filter.filter_read(&record) || alignment.is_refskip() {
+            self.depth -= 1;
+        }
+    }
+
+    /// Convert a pileup into a `Position`.
+    ///
+    /// This will walk over each of the alignments and count the number each nucleotide it finds.
+    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    ///
+    /// # Arguments
+    ///
+    /// * `pileup` - a pileup at a genomic position
+    /// * `header` - a headerview for the bam file being read, to get the sequence name
+    /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    pub fn from_pileup<F: ReadFilter>(
+        pileup: Pileup,
+        header: &bam::HeaderView,
+        read_filter: &F,
+    ) -> Self {
+        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
+        // make output 1-based
+        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        pos.depth = pileup.depth() as usize;
+
+        for alignment in pileup.alignments() {
+            let record = alignment.record();
+            &pos.update(&alignment, record, read_filter);
+        }
+        pos
+    }
+
+    /// Convert a pileup into a `Position`.
+    ///
+    /// This will walk over each of the alignments and count the number each nucleotide it finds.
+    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    /// Additionally, this method is mate aware. Before processing a position it will scan the alignments for mates.
+    /// If a mate is found, it will try to take use the mate that has the highest MAPQ, breaking ties by choosing the
+    /// first in pair that passes filters. In the event of both failing filters or not being first in pair, the first
+    /// read encountered is kept.
+    ///
+    /// # Arguments
+    ///
+    /// * `pileup` - a pileup at a genomic position
+    /// * `header` - a headerview for the bam file being read, to get the sequence name
+    /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    pub fn from_pileup_mate_aware<F: ReadFilter>(
+        pileup: Pileup,
+        header: &bam::HeaderView,
+        read_filter: &F,
+    ) -> Self {
+        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
+        // make output 1-based
+        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        pos.depth = pileup.depth() as usize;
+
+        // Group records by qname
+        let grouped_by_qname = pileup
+            .alignments()
+            .map(|aln| {
+                let record = aln.record();
+                (aln, record)
+            })
+            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
+            // TODO: I'm not sure there is a good way to remove this allocation
+            .group_by(|a| a.1.qname().to_owned());
+
+        for (_qname, reads) in grouped_by_qname.into_iter() {
+            // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
+            let mut total_reads = 0; // count how many reads there were
+            let (alignment, record) = reads
+                .into_iter()
+                .map(|x| {
+                    total_reads += 1;
+                    x
+                })
+                .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
+                    Ordering::Greater => Ordering::Greater,
+                    Ordering::Less => Ordering::Less,
+                    Ordering::Equal => {
+                        // Check if a is first in pair
+                        if a.1.flags() & 64 == 0 && read_filter.filter_read(&a.1) {
+                            Ordering::Greater
+                        } else if b.1.flags() & 64 == 0 && read_filter.filter_read(&b.1) {
+                            Ordering::Less
+                        } else {
+                            // Default to `a` in the event that there is no first in pair for some reason
+                            Ordering::Greater
+                        }
+                    }
+                })
+                .unwrap();
+            // decrement depth for each read not used
+            pos.depth -= total_reads - 1;
+            pos.update(&alignment, record, read_filter);
+        }
+        pos
     }
 }
 
@@ -304,8 +420,8 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     #[fixture]
-    fn read_filter() -> SimpleReadFilter {
-        SimpleReadFilter::new(0, 512, 0)
+    fn read_filter() -> OnlyDepthReadFilter {
+        OnlyDepthReadFilter::new(0, 512, 0)
     }
 
     #[fixture]
@@ -378,11 +494,11 @@ mod tests {
     #[fixture]
     fn non_mate_aware_positions(
         bamfile: (PathBuf, TempDir),
-        read_filter: SimpleReadFilter,
-    ) -> HashMap<String, Vec<Position>> {
+        read_filter: OnlyDepthReadFilter,
+    ) -> HashMap<String, Vec<OnlyDepthPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = SimpleProcessor::new(bamfile.0.clone(), None, false, read_filter);
+        let simple_processor = OnlyDepthProcessor::new(bamfile.0.clone(), None, false, read_filter);
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
@@ -407,11 +523,11 @@ mod tests {
     #[fixture]
     fn mate_aware_positions(
         bamfile: (PathBuf, TempDir),
-        read_filter: SimpleReadFilter,
-    ) -> HashMap<String, Vec<Position>> {
+        read_filter: OnlyDepthReadFilter,
+    ) -> HashMap<String, Vec<OnlyDepthPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = SimpleProcessor::new(
+        let simple_processor = OnlyDepthProcessor::new(
             bamfile.0.clone(),
             None,
             true, // mate aware
@@ -438,17 +554,49 @@ mod tests {
         positions
     }
 
-    #[rstest(
-        positions,
-        awareness_modifier,
-        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
-    )]
-    fn check_insertions(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
-        assert_eq!(positions.get("chr2").unwrap()[0].ins, 0);
-        assert_eq!(positions.get("chr2").unwrap()[1].ins, 1);
-        assert_eq!(positions.get("chr2").unwrap()[2].ins, 0);
-    }
+    // #[rstest(
+    //     positions,
+    //     awareness_modifier,
+    //     case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+    //     case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    // )]
+    // fn check_insertions(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    //     assert_eq!(positions.get("chr2").unwrap()[0].ins, 0);
+    //     assert_eq!(positions.get("chr2").unwrap()[1].ins, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[2].ins, 0);
+    // }
+
+    // #[rstest(
+    //     positions,
+    //     awareness_modifier,
+    //     case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+    //     case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    // )]
+    // fn check_deletions(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    //     assert_eq!(positions.get("chr2").unwrap()[5].del, 0);
+    //     assert_eq!(positions.get("chr2").unwrap()[6].del, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[7].del, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[8].del, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[9].del, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[10].del, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[11].del, 0);
+    // }
+
+    // #[rstest(
+    //     positions,
+    //     awareness_modifier,
+    //     case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+    //     case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    // )]
+    // fn check_refskips(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    //     assert_eq!(positions.get("chr2").unwrap()[11].ref_skip, 0);
+    //     assert_eq!(positions.get("chr2").unwrap()[12].ref_skip, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[13].ref_skip, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[14].ref_skip, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[15].ref_skip, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[16].ref_skip, 1);
+    //     assert_eq!(positions.get("chr2").unwrap()[17].ref_skip, 0);
+    // }
 
     #[rstest(
         positions,
@@ -456,39 +604,7 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_deletions(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
-        assert_eq!(positions.get("chr2").unwrap()[5].del, 0);
-        assert_eq!(positions.get("chr2").unwrap()[6].del, 1);
-        assert_eq!(positions.get("chr2").unwrap()[7].del, 1);
-        assert_eq!(positions.get("chr2").unwrap()[8].del, 1);
-        assert_eq!(positions.get("chr2").unwrap()[9].del, 1);
-        assert_eq!(positions.get("chr2").unwrap()[10].del, 1);
-        assert_eq!(positions.get("chr2").unwrap()[11].del, 0);
-    }
-
-    #[rstest(
-        positions,
-        awareness_modifier,
-        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
-    )]
-    fn check_refskips(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
-        assert_eq!(positions.get("chr2").unwrap()[11].ref_skip, 0);
-        assert_eq!(positions.get("chr2").unwrap()[12].ref_skip, 1);
-        assert_eq!(positions.get("chr2").unwrap()[13].ref_skip, 1);
-        assert_eq!(positions.get("chr2").unwrap()[14].ref_skip, 1);
-        assert_eq!(positions.get("chr2").unwrap()[15].ref_skip, 1);
-        assert_eq!(positions.get("chr2").unwrap()[16].ref_skip, 1);
-        assert_eq!(positions.get("chr2").unwrap()[17].ref_skip, 0);
-    }
-
-    #[rstest(
-        positions,
-        awareness_modifier,
-        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
-    )]
-    fn check_depths(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    fn check_depths(positions: HashMap<String, Vec<OnlyDepthPosition>>, awareness_modifier: usize) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
         assert_eq!(positions.get("chr1").unwrap()[4].depth, 2);
         assert_eq!(positions.get("chr1").unwrap()[9].depth, 3);
@@ -508,12 +624,15 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_filters(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    fn check_filters(
+        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        awareness_modifier: usize,
+    ) {
         // Verify that a read that has flags saying it failed QC got filtered out
         assert_eq!(positions.get("chr2").unwrap()[81].depth, 1);
         assert_eq!(positions.get("chr2").unwrap()[84].depth, 0);
-        assert_eq!(positions.get("chr2").unwrap()[81].fail, 1);
-        assert_eq!(positions.get("chr2").unwrap()[84].fail, 1);
+        // assert_eq!(positions.get("chr2").unwrap()[81].fail, 1);
+        // assert_eq!(positions.get("chr2").unwrap()[84].fail, 1);
     }
 
     #[rstest(
@@ -523,7 +642,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths_insertions(
-        positions: HashMap<String, Vec<Position>>,
+        positions: HashMap<String, Vec<OnlyDepthPosition>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[0].depth, 1);
@@ -538,7 +657,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths_deletions(
-        positions: HashMap<String, Vec<Position>>,
+        positions: HashMap<String, Vec<OnlyDepthPosition>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[5].depth, 2);
@@ -556,7 +675,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_depths_refskips(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    fn check_depths_refskips(
+        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[11].depth, 3);
         assert_eq!(positions.get("chr2").unwrap()[12].depth, 2); // Skip
         assert_eq!(positions.get("chr2").unwrap()[13].depth, 2); // Skip
@@ -572,7 +694,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
     )]
-    fn check_mate_detection(positions: HashMap<String, Vec<Position>>, awareness_modifier: usize) {
+    fn check_mate_detection(
+        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[33].depth, 4);
         assert_eq!(
             positions.get("chr2").unwrap()[34].depth,
@@ -616,17 +741,17 @@ mod tests {
         ); // mate overlap
         assert_eq!(positions.get("chr2").unwrap()[44].depth, 1);
 
-        assert_eq!(positions.get("chr2").unwrap()[33].a, 4);
-        assert_eq!(positions.get("chr2").unwrap()[34].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[35].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[36].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[37].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[38].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[39].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[40].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[41].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[42].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[43].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[44].a, 1);
+        // assert_eq!(positions.get("chr2").unwrap()[33].a, 4);
+        // assert_eq!(positions.get("chr2").unwrap()[34].a, 4 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[35].a, 4 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[36].a, 4 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[37].a, 4 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[38].a, 4 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[39].a, 2 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[40].a, 2 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[41].a, 2 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[42].a, 2 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[43].a, 2 - awareness_modifier); // mate overlap
+        // assert_eq!(positions.get("chr2").unwrap()[44].a, 1);
     }
 }
