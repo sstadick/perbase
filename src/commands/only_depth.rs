@@ -6,25 +6,24 @@
 use anyhow::Result;
 use csv;
 use grep_cli::stdout;
-use itertools::Itertools;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::ReadFilter,
+    position::{range_positions::RangePositions, Position},
+    read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
 use rust_htslib::{
     bam,
+    bam::ext::BamRecordExtensions,
     bam::pileup::{Alignment, Pileup},
     bam::record::Cigar,
     bam::record::Record,
     bam::Read,
 };
-use serde::Serialize;
 use smartstring::alias::String;
+use std::convert::TryFrom;
 use std::{
-    cmp::Ordering,
-    default,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -68,8 +67,12 @@ pub struct OnlyDepth {
     exclude_flags: u16,
 
     /// Fix overlapping mates counts, see docs for full details.
-    #[structopt(long, short = "m")]
+    #[structopt(long, short = "m", conflicts_with = "fast_mode")]
     mate_fix: bool,
+
+    /// Calculate depth based only on read starts/stops, see docs for full details.
+    #[structopt(long, short = "x")]
+    fast_mode: bool,
 
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
@@ -84,11 +87,12 @@ impl OnlyDepth {
         let mut writer = self.get_writer()?;
 
         let read_filter =
-            OnlyDepthReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
+            DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
         let processor = OnlyDepthProcessor::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
+            self.fast_mode,
             read_filter,
         );
 
@@ -124,69 +128,44 @@ impl OnlyDepth {
     }
 }
 
-/// A straightforward read filter.
-pub struct OnlyDepthReadFilter {
-    include_flags: u16,
-    exclude_flags: u16,
-    min_mapq: u8,
-}
-
-impl OnlyDepthReadFilter {
-    /// Create an OnlyDepthReadFilter
-    fn new(include_flags: u16, exclude_flags: u16, min_mapq: u8) -> Self {
-        Self {
-            include_flags,
-            exclude_flags,
-            min_mapq,
-        }
-    }
-}
-
-impl ReadFilter for OnlyDepthReadFilter {
-    /// Filter reads based SAM flags and mapping quality
-    #[inline]
-    fn filter_read(&self, read: &Record) -> bool {
-        let flags = read.flags();
-        (!flags) & &self.include_flags == 0
-            && flags & &self.exclude_flags == 0
-            && &read.mapq() >= &self.min_mapq
-    }
-}
 /// Holds the info needed for [par_io::RegionProcessor] implementation
 struct OnlyDepthProcessor<F: ReadFilter> {
     /// path to indexed BAM/CRAM
     reads: PathBuf,
     /// path to indexed ref file
     ref_fasta: Option<PathBuf>,
-    /// Indicate whether or not to account for overlapping mates.
+    /// Indicate whether or not to account for overlapping mates. Not checked in fastmode
     mate_fix: bool,
+    /// Indicate whether or not to run in fastmode, only using read starts and stops
+    fast_mode: bool,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
 }
 
 impl<F: ReadFilter> OnlyDepthProcessor<F> {
-    /// Create a new SimpleProcessor
-    fn new(reads: PathBuf, ref_fasta: Option<PathBuf>, mate_fix: bool, read_filter: F) -> Self {
+    /// Create a new OnlyDepthProcessor
+    fn new(
+        reads: PathBuf,
+        ref_fasta: Option<PathBuf>,
+        mate_fix: bool,
+        fast_mode: bool,
+        read_filter: F,
+    ) -> Self {
         Self {
             reads,
             ref_fasta,
+            fast_mode,
             mate_fix,
             read_filter,
         }
     }
-}
 
-/// Implement [par_io::RegionProcessor] for [SimpleProcessor]
-impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
-    /// Objects of [position::Position] will be returned by each call to [SimpleProcessor::process_region]
-    type P = OnlyDepthPosition;
-
-    /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
-    /// walking the pileup (checking bounds) to create Position objects according to
-    /// the defined filters
-    // TODO: make `Position` a trait that can be implemented for each new depth tester
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<OnlyDepthPosition> {
-        info!("Processing region {}:{}-{}", tid, start, stop);
+    // HERE
+    // TODO: generally clean up and make tests work
+    // TODO: Add to docs explaining how this mode is different, and how you may end up with some regions the are same-same due to threads
+    //   TODO: if that is a concern, either make a bedfile with exact regions you care about, or set chunksize to > biggest chr size
+    //   TODO: for the mate / cigar aware version, do something like: https://docs.rs/rust-htslib/0.32.0/src/rust_htslib/bam/ext.rs.html#94
+    fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -199,212 +178,84 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
         let header = reader.header().to_owned();
         // fetch the region of interest
         reader.fetch(tid, start, stop).expect("Fetched a region");
-        // Walk over pileups
-        let result: Vec<OnlyDepthPosition> = reader
-            .pileup()
-            .flat_map(|p| {
-                let pileup = p.expect("Extracted a pileup");
-                // Verify that we are within the bounds of the chunk we are iterating on
-                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-                    if self.mate_fix {
-                        Some(OnlyDepthPosition::from_pileup_mate_aware(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                        ))
-                    } else {
-                        Some(OnlyDepthPosition::from_pileup(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                        ))
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-        result
-    }
-}
 
-pub struct IterStartStops {
-    // offset into the read ref positions to start at
-    offset: usize,
-    // hardstop ref positon in reead to stop at
-    hardstop: usize,
-    // index into the cigar string
-    cigar_index: usize,
-    // vec of cigar ops
-    cigar: Vec<Cigar>,
-}
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
 
-impl IterStartStops {
-    fn new(cigar: Vec<Cigar>, offset: usize, hardstop: usize) -> Self {
-        IterStartStops {
-            cigar_index: 0,
-            hardstop,
-            offset,
-            cigar,
-        }
-    }
-}
+        // Move to a method or something
+        // Walk over each read, assume fastmode
+        for record in reader
+            .records()
+            .map(|r| r.expect("Read record"))
+            .filter(|read| self.read_filter.filter_read(&read))
+        {
+            let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
+            let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
 
-/// Iterator over the start-stop pairs given a cigar string and a position offset
-impl Iterator for IterStartStops {
-    type Item = (usize, usize);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.cigar_index < self.cigar.len() {
-            let mut start = self.offset;
-            let mut ref_consumed = 0;
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                // refconsuming and not breaking
-                Cigar::Match(olen) | Cigar::Diff(olen) | Cigar::Equal(olen) | Cigar::Del(olen) => {
-                    ref_consumed += olen as usize
-                }
-                // non-ref consuming and not breaking
-                Cigar::Ins(_) | Cigar::SoftClip(_) => (),
-                // ref-consuming and breaking
-                Cigar::RefSkip(olen) => {
-                    let stop = start + ref_consumed + olen as usize;
-                    let result = (start, stop);
-                    self.offset = stop;
-                    self.cigar_index += 1;
-                    return Some(result);
-                }
-                // no-ops
-                Cigar::Pad(_) | Cigar::HardClip(_) => (),
-                _ => unreachable!(),
+            // rectify start / stop with region bounderies
+            if rec_start < start {
+                // increment the start of the region
+                counter[0] += 1;
+            } else {
+                let point = (rec_start - start) as usize;
+                counter[point] += 1;
             }
-            self.cigar_index += 1;
+
+            if rec_stop > stop {
+                // decrement the end of the region
+                *(counter.last_mut().expect("Non zero size region")) -= 1;
+            } else {
+                let point = (rec_stop - start) as usize;
+                counter[point] -= 1;
+            }
         }
-        None
+
+        // Sum the counter and merge same-depth ranges of positions
+        let name = std::str::from_utf8(header.tid2name(tid)).unwrap();
+        let mut sum: i32 = 0;
+        // TODO: the end poses are almost certainly off by one
+        let mut results = vec![];
+        let mut curr_start = 0;
+        let mut curr_depth = counter[0];
+        for (i, count) in counter.iter().enumerate() {
+            sum += count;
+            // freeze pos and start new one
+            if curr_depth != sum {
+                let mut pos = RangePositions::new(String::from(name), curr_start);
+                pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
+                pos.end = start as usize + i;
+
+                curr_start = start as usize + i;
+                curr_depth = sum;
+                results.push(pos);
+            }
+        }
+
+        // TODO: Double check this is working as expected
+        let mut pos = RangePositions::new(String::from(name), curr_start);
+        pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
+        // pos.end = right;
+        pos.end = stop as usize;
+        results.push(pos);
+
+        results
     }
 }
 
-/// Hold all information about a position.
-#[derive(Debug, Serialize, Default)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub struct OnlyDepthPosition {
-    /// Reference sequence name.
-    #[serde(rename = "REF")]
-    pub ref_seq: String,
-    /// 1-based position in the sequence.
-    pub pos: usize,
-    /// Total depth at this position.
-    pub depth: usize,
-}
+/// Implement [par_io::RegionProcessor] for [SimpleProcessor]
+impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
+    /// Objects of [position::Position] will be returned by each call to [SimpleProcessor::process_region]
+    type P = RangePositions;
 
-impl OnlyDepthPosition {
-    pub fn new(ref_seq: String, pos: usize) -> Self {
-        Self {
-            ref_seq,
-            pos,
-            ..default::Default::default()
+    /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
+    /// walking the pileup (checking bounds) to create Position objects according to
+    /// the defined filters
+    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+        info!("Processing region {}:{}-{}", tid, start, stop);
+        if self.fast_mode {
+            self.process_region_fast(tid, start, stop)
+        } else {
+            unimplemented!()
         }
-    }
-
-    /// Given a record, update the counts at this position
-    fn update<F: ReadFilter>(&mut self, alignment: &Alignment, record: Record, read_filter: &F) {
-        if !read_filter.filter_read(&record) || alignment.is_refskip() {
-            self.depth -= 1;
-        }
-    }
-
-    /// Convert a pileup into a `Position`.
-    ///
-    /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
-    ///
-    /// # Arguments
-    ///
-    /// * `pileup` - a pileup at a genomic position
-    /// * `header` - a headerview for the bam file being read, to get the sequence name
-    /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
-    pub fn from_pileup<F: ReadFilter>(
-        pileup: Pileup,
-        header: &bam::HeaderView,
-        read_filter: &F,
-    ) -> Self {
-        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
-        // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
-        pos.depth = pileup.depth() as usize;
-
-        for alignment in pileup.alignments() {
-            let record = alignment.record();
-            &pos.update(&alignment, record, read_filter);
-        }
-        pos
-    }
-
-    /// Convert a pileup into a `Position`.
-    ///
-    /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
-    /// Additionally, this method is mate aware. Before processing a position it will scan the alignments for mates.
-    /// If a mate is found, it will try to take use the mate that has the highest MAPQ, breaking ties by choosing the
-    /// first in pair that passes filters. In the event of both failing filters or not being first in pair, the first
-    /// read encountered is kept.
-    ///
-    /// # Arguments
-    ///
-    /// * `pileup` - a pileup at a genomic position
-    /// * `header` - a headerview for the bam file being read, to get the sequence name
-    /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
-    pub fn from_pileup_mate_aware<F: ReadFilter>(
-        pileup: Pileup,
-        header: &bam::HeaderView,
-        read_filter: &F,
-    ) -> Self {
-        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
-        // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
-        pos.depth = pileup.depth() as usize;
-
-        // Group records by qname
-        let grouped_by_qname = pileup
-            .alignments()
-            .map(|aln| {
-                let record = aln.record();
-                (aln, record)
-            })
-            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
-            // TODO: I'm not sure there is a good way to remove this allocation
-            .group_by(|a| a.1.qname().to_owned());
-
-        for (_qname, reads) in grouped_by_qname.into_iter() {
-            // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
-            let mut total_reads = 0; // count how many reads there were
-            let (alignment, record) = reads
-                .into_iter()
-                .map(|x| {
-                    total_reads += 1;
-                    x
-                })
-                .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
-                    Ordering::Greater => Ordering::Greater,
-                    Ordering::Less => Ordering::Less,
-                    Ordering::Equal => {
-                        // Check if a is first in pair
-                        if a.1.flags() & 64 == 0 && read_filter.filter_read(&a.1) {
-                            Ordering::Greater
-                        } else if b.1.flags() & 64 == 0 && read_filter.filter_read(&b.1) {
-                            Ordering::Less
-                        } else {
-                            // Default to `a` in the event that there is no first in pair for some reason
-                            Ordering::Greater
-                        }
-                    }
-                })
-                .unwrap();
-            // decrement depth for each read not used
-            pos.depth -= total_reads - 1;
-            pos.update(&alignment, record, read_filter);
-        }
-        pos
     }
 }
 
@@ -412,7 +263,10 @@ impl OnlyDepthPosition {
 #[allow(unused)]
 mod tests {
     use super::*;
-    use perbase_lib::position::Position;
+    use perbase_lib::{
+        position::{range_positions::RangePositions, Position},
+        read_filter::DefaultReadFilter,
+    };
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use smartstring::alias::*;
@@ -420,8 +274,8 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     #[fixture]
-    fn read_filter() -> OnlyDepthReadFilter {
-        OnlyDepthReadFilter::new(0, 512, 0)
+    fn read_filter() -> DefaultReadFilter {
+        DefaultReadFilter::new(0, 512, 0)
     }
 
     #[fixture]
@@ -494,8 +348,8 @@ mod tests {
     #[fixture]
     fn non_mate_aware_positions(
         bamfile: (PathBuf, TempDir),
-        read_filter: OnlyDepthReadFilter,
-    ) -> HashMap<String, Vec<OnlyDepthPosition>> {
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor = OnlyDepthProcessor::new(bamfile.0.clone(), None, false, read_filter);
@@ -523,8 +377,8 @@ mod tests {
     #[fixture]
     fn mate_aware_positions(
         bamfile: (PathBuf, TempDir),
-        read_filter: OnlyDepthReadFilter,
-    ) -> HashMap<String, Vec<OnlyDepthPosition>> {
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor = OnlyDepthProcessor::new(
@@ -604,7 +458,7 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_depths(positions: HashMap<String, Vec<OnlyDepthPosition>>, awareness_modifier: usize) {
+    fn check_depths(positions: HashMap<String, Vec<RangePositions>>, awareness_modifier: usize) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
         assert_eq!(positions.get("chr1").unwrap()[4].depth, 2);
         assert_eq!(positions.get("chr1").unwrap()[9].depth, 3);
@@ -642,7 +496,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths_insertions(
-        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        positions: HashMap<String, Vec<RangePositions>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[0].depth, 1);
@@ -657,7 +511,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths_deletions(
-        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        positions: HashMap<String, Vec<RangePositions>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[5].depth, 2);
@@ -676,7 +530,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
     fn check_depths_refskips(
-        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        positions: HashMap<String, Vec<RangePositions>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[11].depth, 3);
@@ -695,7 +549,7 @@ mod tests {
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
     )]
     fn check_mate_detection(
-        positions: HashMap<String, Vec<OnlyDepthPosition>>,
+        positions: HashMap<String, Vec<RangePositions>>,
         awareness_modifier: usize,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[33].depth, 4);
