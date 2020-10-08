@@ -14,7 +14,8 @@
 //! use anyhow::Result;
 //! use perbase_lib::{
 //!     par_granges::{self, RegionProcessor},
-//!     position::{Position, ReadFilter},
+//!     position::pileup_position::PileupPosition,
+//!     read_filter::ReadFilter,
 //! };
 //! use rust_htslib::bam::{self, record::Record, Read};
 //! use std::path::PathBuf;
@@ -53,7 +54,7 @@
 //!
 //! // Implementation of the `RegionProcessor` trait to process each region
 //! impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
-//!     type P = Position;
+//!     type P = PileupPosition;
 //!
 //!     // This function receives an interval to examine.
 //!     fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
@@ -62,14 +63,14 @@
 //!         // fetch the region
 //!         reader.fetch(tid, start, stop).expect("Fetched ROI");
 //!         // Walk over pileups
-//!         let result: Vec<Position> = reader
+//!         let result: Vec<PileupPosition> = reader
 //!             .pileup()
 //!             .flat_map(|p| {
 //!                 let pileup = p.expect("Extracted a pileup");
 //!                 // Verify that we are within the bounds of the chunk we are iterating on
 //!                 // Since pileup will pull reads that overhang edges.
 //!                 if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-//!                     Some(Position::from_pileup(pileup, &header, &self.read_filter))
+//!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter))
 //!                 } else {
 //!                     None
 //!                 }
@@ -106,7 +107,7 @@
 //!     // Run the processor
 //!     let receiver = par_granges_runner.process()?;
 //!     // Pull the in-order results from the receiver channel
-//!     receiver.into_iter().for_each(|p: Position| {
+//!     receiver.into_iter().for_each(|p: PileupPosition| {
 //!         // Note that the returned values are required to be `serde::Serialize`, so more fancy things
 //!         // than just debug printing are doable.
 //!         println!("{:?}", p);
@@ -119,5 +120,5 @@
 #![warn(missing_doc_code_examples)]
 pub mod par_granges;
 pub mod position;
-pub mod utils;
 pub mod read_filter;
+pub mod utils;

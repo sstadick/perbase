@@ -9,11 +9,11 @@ use grep_cli::stdout;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    read_filter::{ReadFilter, DefaultReadFilter},
-    position::{pileup_position::PileupPosition},
+    position::pileup_position::PileupPosition,
+    read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
-use rust_htslib::{bam, bam::record::Record, bam::Read};
+use rust_htslib::{bam, bam::Read};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -64,6 +64,10 @@ pub struct SimpleDepth {
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
+
+    /// Output positions as 0-based instead of 1-based.
+    #[structopt(long, short = "z")]
+    zero_base: bool,
 }
 
 impl SimpleDepth {
@@ -79,6 +83,7 @@ impl SimpleDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
+            if self.zero_base { 0 } else { 1 },
             read_filter,
         );
 
@@ -122,17 +127,26 @@ struct SimpleProcessor<F: ReadFilter> {
     ref_fasta: Option<PathBuf>,
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
+    /// 0-based or 1-based coordiante output
+    coord_base: usize,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
 }
 
 impl<F: ReadFilter> SimpleProcessor<F> {
     /// Create a new SimpleProcessor
-    fn new(reads: PathBuf, ref_fasta: Option<PathBuf>, mate_fix: bool, read_filter: F) -> Self {
+    fn new(
+        reads: PathBuf,
+        ref_fasta: Option<PathBuf>,
+        mate_fix: bool,
+        coord_base: usize,
+        read_filter: F,
+    ) -> Self {
         Self {
             reads,
             ref_fasta,
             mate_fix,
+            coord_base,
             read_filter,
         }
     }
@@ -167,15 +181,13 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
                 if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-                    if self.mate_fix {
-                        Some(PileupPosition::from_pileup_mate_aware(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                        ))
+                    let mut pos = if self.mate_fix {
+                        PileupPosition::from_pileup_mate_aware(pileup, &header, &self.read_filter)
                     } else {
-                        Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter))
-                    }
+                        PileupPosition::from_pileup(pileup, &header, &self.read_filter)
+                    };
+                    pos.pos += self.coord_base;
+                    Some(pos)
                 } else {
                     None
                 }
@@ -189,12 +201,12 @@ impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
 #[allow(unused)]
 mod tests {
     use super::*;
-    use perbase_lib::position::{Position, pileup_position::PileupPosition};
+    use perbase_lib::position::{pileup_position::PileupPosition, Position};
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
+    use smartstring::alias::*;
     use std::{collections::HashMap, path::PathBuf};
     use tempfile::{tempdir, TempDir};
-    use smartstring::alias::*;
 
     #[fixture]
     fn read_filter() -> DefaultReadFilter {
@@ -263,7 +275,7 @@ mod tests {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
-        // build the index
+                      // build the index
         bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
         (path, tempdir)
     }
@@ -275,26 +287,25 @@ mod tests {
     ) -> HashMap<String, Vec<PileupPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = SimpleProcessor::new(
-            bamfile.0.clone(),
-            None,
-            false,
-            read_filter,
-        );
+        let simple_processor = SimpleProcessor::new(bamfile.0.clone(), None, false, 1, read_filter);
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None, // TODO - make a test with befile
+            None,       // TODO - make a test with befile
             Some(cpus), // TODO - parameterize over this
-            None, // TODO - parameterize over this
+            None,       // TODO - parameterize over this
             simple_processor,
         );
         let mut positions = HashMap::new();
-        par_granges_runner.process().unwrap().into_iter().for_each(|p| {
-            let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
-            pos.push(p)
-        });
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                pos.push(p)
+            });
         positions
     }
 
@@ -309,22 +320,27 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            1,
             read_filter,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None, // TODO - make a test with befile
+            None,       // TODO - make a test with befile
             Some(cpus), // TODO - parameterize over this
-            None, // TODO - parameterize over this
+            None,       // TODO - parameterize over this
             simple_processor,
         );
         let mut positions = HashMap::new();
-        par_granges_runner.process().unwrap().into_iter().for_each(|p| {
-            let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
-            pos.push(p)
-        });
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                pos.push(p)
+            });
         positions
     }
 
@@ -334,7 +350,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_insertions(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+    fn check_insertions(
+        positions: HashMap<String, Vec<PileupPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[0].ins, 0);
         assert_eq!(positions.get("chr2").unwrap()[1].ins, 1);
         assert_eq!(positions.get("chr2").unwrap()[2].ins, 0);
@@ -412,7 +431,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_depths_insertions(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+    fn check_depths_insertions(
+        positions: HashMap<String, Vec<PileupPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[0].depth, 1);
         assert_eq!(positions.get("chr2").unwrap()[1].depth, 1); // Insertion is here
         assert_eq!(positions.get("chr2").unwrap()[2].depth, 1);
@@ -424,7 +446,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_depths_deletions(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+    fn check_depths_deletions(
+        positions: HashMap<String, Vec<PileupPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[5].depth, 2);
         assert_eq!(positions.get("chr2").unwrap()[6].depth, 2); // Del
         assert_eq!(positions.get("chr2").unwrap()[7].depth, 2); // Del
@@ -440,7 +465,10 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
     )]
-    fn check_depths_refskips(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+    fn check_depths_refskips(
+        positions: HashMap<String, Vec<PileupPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[11].depth, 3);
         assert_eq!(positions.get("chr2").unwrap()[12].depth, 2); // Skip
         assert_eq!(positions.get("chr2").unwrap()[13].depth, 2); // Skip
@@ -456,18 +484,51 @@ mod tests {
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
     )]
-    fn check_mate_detection(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+    fn check_mate_detection(
+        positions: HashMap<String, Vec<PileupPosition>>,
+        awareness_modifier: usize,
+    ) {
         assert_eq!(positions.get("chr2").unwrap()[33].depth, 4);
-        assert_eq!(positions.get("chr2").unwrap()[34].depth, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[35].depth, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[36].depth, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[37].depth, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[38].depth, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[39].depth, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[40].depth, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[41].depth, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[42].depth, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[43].depth, 2 - awareness_modifier); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[34].depth,
+            4 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[35].depth,
+            4 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[36].depth,
+            4 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[37].depth,
+            4 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[38].depth,
+            4 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[39].depth,
+            2 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[40].depth,
+            2 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[41].depth,
+            2 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[42].depth,
+            2 - awareness_modifier
+        ); // mate overlap
+        assert_eq!(
+            positions.get("chr2").unwrap()[43].depth,
+            2 - awareness_modifier
+        ); // mate overlap
         assert_eq!(positions.get("chr2").unwrap()[44].depth, 1);
 
         assert_eq!(positions.get("chr2").unwrap()[33].a, 4);
