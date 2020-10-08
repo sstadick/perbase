@@ -381,12 +381,16 @@ mod tests {
         let mut header = bam::header::Header::new();
         let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
         chr1.push_tag(b"SN", &"chr1".to_owned());
-        chr1.push_tag(b"LN", &"100".to_owned());
+        chr1.push_tag(b"LN", &"3000000".to_owned());
         let mut chr2 = bam::header::HeaderRecord::new(b"SQ");
         chr2.push_tag(b"SN", &"chr2".to_owned());
-        chr2.push_tag(b"LN", &"100".to_owned());
+        chr2.push_tag(b"LN", &"3000000".to_owned());
+        let mut chr3 = bam::header::HeaderRecord::new(b"SQ");
+        chr3.push_tag(b"SN", &"chr3".to_owned());
+        chr3.push_tag(b"LN", &"3000000".to_owned());
         header.push_record(&chr1);
         header.push_record(&chr2);
+        header.push_record(&chr3);
         let view = bam::HeaderView::from_header(&header);
 
         // Add records
@@ -423,6 +427,20 @@ mod tests {
             Record::from_sam(&view, b"THREE\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // A failure of QC
             Record::from_sam(&view, b"FOUR\t659\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
+            // Chr3, weird inter-seq breakpoints
+            // Huge skip at start
+            Record::from_sam(&view, b"ONE\t67\tchr3\t1\t40\t2M2000000N23M\tchr3\t50\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO\t67\tchr3\t5\t40\t25M\tchr3\t55\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Huge skip at end
+            Record::from_sam(&view, b"THREE\t67\tchr3\t10\t40\t23M2000000N2M\tchr3\t60\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR\t67\tchr3\t15\t40\t25M\tchr3\t65\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t67\tchr3\t20\t40\t25M\tchr3\t70\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"ONE\t147\tchr3\t50\t40\t25M\tchr3\t1\t75\tTTTTTTTTTTTTTTTTTTTTTTTTT\t#########################").unwrap(),
+            Record::from_sam(&view, b"TWO\t147\tchr3\t55\t40\t25M\tchr3\t5\t75\tGGGGGGGGGGGGGGGGGGGGGGGGG\t#########################").unwrap(),
+            Record::from_sam(&view, b"THREE\t147\tchr3\t60\t40\t25M\tchr3\t10\t75\tCCCCCCCCCCCCCCCCCCCCCCCCC\t#########################").unwrap(),
+            Record::from_sam(&view, b"FOUR\t147\tchr3\t65\t40\t25M\tchr3\t15\t75\tNNNNNNNNNNNNNNNNNNNNNNNNN\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr3\t70\t40\t25M\tchr3\t20\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
         ];
 
         // Update the test/test.bam file
@@ -435,6 +453,34 @@ mod tests {
                       // build the index
         bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
         (path, tempdir)
+    }
+    #[rstest(
+        fast_mode => [true, false]
+    )]
+    fn test_can_parse(fast_mode: bool, bamfile: (PathBuf, TempDir), read_filter: DefaultReadFilter) {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        let simple_processor =
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, fast_mode, 0, read_filter);
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,       // TODO - make a test with befile
+            Some(cpus), // TODO - parameterize over this
+            None,       // TODO - parameterize over this
+            simple_processor,
+        );
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                pos.push(p)
+            });
+        assert_eq!(positions.keys().len(), 3);
     }
 
     #[fixture]
