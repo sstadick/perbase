@@ -92,7 +92,7 @@ impl PileupPosition {
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    /// It will also count the number of Ins/Dels/Skips that are at each position.
     ///
     /// # Arguments
     ///
@@ -106,7 +106,7 @@ impl PileupPosition {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
         pos.depth = pileup.depth() as usize;
 
         for alignment in pileup.alignments() {
@@ -119,7 +119,8 @@ impl PileupPosition {
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    /// It will also count the number of Ins/Dels/Skips that are at each position.
+    ///
     /// Additionally, this method is mate aware. Before processing a position it will scan the alignments for mates.
     /// If a mate is found, it will try to take use the mate that has the highest MAPQ, breaking ties by choosing the
     /// first in pair that passes filters. In the event of both failing filters or not being first in pair, the first
@@ -137,7 +138,7 @@ impl PileupPosition {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
         pos.depth = pileup.depth() as usize;
 
         // Group records by qname

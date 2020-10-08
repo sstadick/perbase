@@ -454,6 +454,8 @@ mod tests {
         bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
         (path, tempdir)
     }
+
+    // Test that all regions of the test bam can be read and don't panic.
     #[rstest(
         fast_mode => [true, false]
     )]
@@ -466,9 +468,9 @@ mod tests {
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None,       // TODO - make a test with befile
-            Some(cpus), // TODO - parameterize over this
-            None,       // TODO - parameterize over this
+            None,
+            Some(cpus),
+            None,
             simple_processor,
         );
         let mut positions = HashMap::new();
@@ -532,9 +534,9 @@ mod tests {
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None,       // TODO - make a test with befile
-            Some(cpus), // TODO - parameterize over this
-            None,       // TODO - parameterize over this
+            None,
+            Some(cpus),
+            None,
             simple_processor,
         );
         let mut positions = HashMap::new();

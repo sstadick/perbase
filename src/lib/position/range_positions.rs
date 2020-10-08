@@ -1,3 +1,6 @@
+//! An implementation of `Position` that covers a range from `pos` to `end`.
+//!
+//! Whether this is 0-based or 1-based is up to the caller.
 use crate::position::Position;
 use serde::Serialize;
 use smartstring::alias::String;

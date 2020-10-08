@@ -292,9 +292,9 @@ mod tests {
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None,       // TODO - make a test with befile
-            Some(cpus), // TODO - parameterize over this
-            None,       // TODO - parameterize over this
+            None,
+            Some(cpus),
+            None,
             simple_processor,
         );
         let mut positions = HashMap::new();
@@ -327,9 +327,9 @@ mod tests {
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
-            None,       // TODO - make a test with befile
-            Some(cpus), // TODO - parameterize over this
-            None,       // TODO - parameterize over this
+            None,
+            Some(cpus),
+            None,
             simple_processor,
         );
         let mut positions = HashMap::new();
@@ -389,6 +389,26 @@ mod tests {
         assert_eq!(positions.get("chr2").unwrap()[15].ref_skip, 1);
         assert_eq!(positions.get("chr2").unwrap()[16].ref_skip, 1);
         assert_eq!(positions.get("chr2").unwrap()[17].ref_skip, 0);
+    }
+
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+    )]
+    fn check_start(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: usize) {
+        assert_eq!(positions.get("chr1").unwrap()[0].pos, 1);
+        assert_eq!(positions.get("chr1").unwrap()[4].pos, 5);
+        assert_eq!(positions.get("chr1").unwrap()[9].pos, 10);
+        assert_eq!(positions.get("chr1").unwrap()[14].pos, 15);
+        assert_eq!(positions.get("chr1").unwrap()[19].pos, 20);
+        assert_eq!(positions.get("chr1").unwrap()[25].pos, 26);
+        assert_eq!(positions.get("chr1").unwrap()[29].pos, 30);
+        assert_eq!(positions.get("chr1").unwrap()[34].pos, 35);
+        assert_eq!(positions.get("chr1").unwrap()[39].pos, 40);
+        // NB: -6 bc there are 6 positions with no coverage from 44-50
+        assert_eq!(positions.get("chr1").unwrap()[72].pos, 78);
     }
 
     #[rstest(
