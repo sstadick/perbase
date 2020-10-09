@@ -13,15 +13,12 @@ use perbase_lib::{
     read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
-use rust_htslib::{
-    bam,
-    bam::ext::BamRecordExtensions,
-    bam::record::Cigar,
-    bam::Read,
-};
+use rust_htslib::{bam, bam::ext::BamRecordExtensions, bam::record::Cigar, bam::Read};
+use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
 use std::convert::TryFrom;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -168,7 +165,13 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     /// Sum the counts within the region to get the depths at each RangePosition
-    fn sum_counter(&self, counter: Vec<i32>, contig: &str, region_start: u64, region_stop: u64) -> Vec<RangePositions> {
+    fn sum_counter(
+        &self,
+        counter: Vec<i32>,
+        contig: &str,
+        region_start: u64,
+        region_stop: u64,
+    ) -> Vec<RangePositions> {
         // Sum the counter and merge same-depth ranges of positions
         let mut sum: i32 = 0;
         let mut results = vec![];
@@ -178,7 +181,8 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             sum += count;
             // freeze pos and start new one
             if curr_depth != sum {
-                let mut pos = RangePositions::new(String::from(contig), curr_start + self.coord_base);
+                let mut pos =
+                    RangePositions::new(String::from(contig), curr_start + self.coord_base);
                 pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
                 pos.end = region_start as usize + i + self.coord_base;
 
@@ -198,53 +202,63 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     // TODO: Add to docs explaining how this mode is different, and how you may end up with some regions the are same-same due to threads
     //   TODO: if that is a concern, either make a bedfile with exact regions you care about, or set chunksize to > biggest chr size
     // TODO: Make it possible to turn off adjacent mergeing
-    fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
-        // Create a reader
-        let mut reader =
-            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+    // fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+    //     // Create a reader
+    //     let mut reader =
+    //         bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
 
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta).expect("Set ref");
+    //     // If passed add ref_fasta
+    //     if let Some(ref_fasta) = &self.ref_fasta {
+    //         reader.set_reference(ref_fasta).expect("Set ref");
+    //     }
+
+    //     let header = reader.header().to_owned();
+    //     // fetch the region of interest
+    //     reader.fetch(tid, start, stop).expect("Fetched a region");
+
+    //     let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+
+    //     // Walk over each read, counting the starts and ends
+    //     for record in reader
+    //         .records()
+    //         .map(|r| r.expect("Read record"))
+    //         .filter(|read| self.read_filter.filter_read(&read))
+    //     {
+    //         let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
+    //         let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
+
+    //         // rectify start / stop with region boundaries
+    //         // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
+    //         if rec_start < start {
+    //             counter[0] += 1;
+    //         } else {
+    //             let point = (rec_start - start) as usize;
+    //             counter[point] += 1;
+    //         }
+
+    //         // decrement the end of the region
+    //         if rec_stop > stop {
+    //             *(counter.last_mut().expect("Non zero size region")) -= 1;
+    //         } else {
+    //             let point = (rec_stop - start) as usize;
+    //             counter[point] -= 1;
+    //         }
+    //     }
+
+    //     // Sum the counter and merge same-depth ranges of positions
+    //     let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
+    //     self.sum_counter(counter, contig, start, stop)
+    // }
+
+    /// Detect an overlap of mates
+    #[inline]
+    fn overlaps_mate(record: &bam::Record) -> bool {
+        if !record.is_paired() || record.tid() != record.mtid() {
+            return false;
         }
-
-        let header = reader.header().to_owned();
-        // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
-
-        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-
-        // Walk over each read, counting the starts and ends
-        for record in reader
-            .records()
-            .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(&read))
-        {
-            let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
-            let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
-
-            // rectify start / stop with region boundaries
-            // increment the start of the region
-            // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
-            if rec_start < start {
-                counter[0] += 1;
-            } else {
-                let point = (rec_start - start) as usize;
-                counter[point] += 1;
-            }
-
-            // decrement the end of the region
-            if rec_stop > stop {
-                *(counter.last_mut().expect("Non zero size region")) -= 1;
-            } else {
-                let point = (rec_stop - start) as usize;
-                counter[point] -= 1;
-            }
-        }
-
-        // Sum the counter and merge same-depth ranges of positions
-        let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-        self.sum_counter(counter, contig, start, stop)
+        let tlen = record.insert_size().abs();
+        let read_len = record.reference_end() - record.reference_start();
+        (tlen / 2) < read_len
     }
 
     /// Process a region, taking into account REF_SKIPs and mates
@@ -263,39 +277,159 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         reader.fetch(tid, start, stop).expect("Fetched a region");
 
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut maties = HashMap::new();
 
         // Walk over each read, counting the starts and ends
         for record in reader
             .records()
             .map(|r| r.expect("Read record"))
             .filter(|read| self.read_filter.filter_read(&read))
-            // TODO: Find non-allocating way of doing this
-            .flat_map(|record| IterAlignedBlocks{pos: record.reference_start(), cigar_index: 0, cigar: record.cigar().to_vec()})
         {
-            let rec_start = u64::try_from(record.0).expect("check overflow");
-            let rec_stop = u64::try_from(record.1).expect("check overflow");
+            // Decide if the mate may overlap
+            let mate_overlap = if self.mate_fix {
+                Self::overlaps_mate(&record)
+            } else {
+                false
+            };
+            info!("Mate overlap? for {:?} - {:?}", record, mate_overlap);
 
-            // NB: since we are splitting the region, it's possible the region we are looking at
-            // may occur before the ROI, or after the ROI
-            if rec_start > stop || start > rec_stop {
-                continue;
+            // TODO: Find non-allocating way of doing this
+            let iter = IterAlignedBlocks {
+                pos: record.reference_start(),
+                cigar_index: 0,
+                cigar: record.cigar().to_vec(),
+            };
+            for block in iter {
+                let rec_start = u64::try_from(block.0).expect("check overflow");
+                let rec_stop = u64::try_from(block.1).expect("check overflow");
+
+                // NB: since we are splitting the region, it's possible the region we are looking at
+                // may occur before the ROI, or after the ROI
+                if rec_start > stop || start > rec_stop {
+                    continue;
+                }
+
+                // rectify start / stop with region boundaries
+                // increment the start of the region
+                let adjusted_start = if rec_start < start {
+                    0
+                } else {
+                    (rec_start - start) as usize
+                };
+
+                let adjusted_stop = if rec_stop > stop {
+                    counter.len() - 1
+                } else {
+                    (rec_stop - start) as usize
+                };
+
+                // check if this read has a mate that will be seen within this region
+                // that this works for both mates in pair
+                if mate_overlap {
+                    // TODO: figure out better way of passing qname around, get rid of Lazy
+                    let qname =
+                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
+                    let intervals = maties.entry(qname).or_insert(vec![]);
+                    intervals.push(Interval {
+                        start: adjusted_start,
+                        stop: adjusted_stop,
+                        val: (),
+                    });
+                } else {
+                    counter[adjusted_start] += 1;
+                    counter[adjusted_stop] -= 1;
+                }
             }
+        }
+
+        if self.mate_fix {
+            // check maties
+            for (_qname, ivs) in maties.drain() {
+                let mut lapper = Lapper::new(ivs);
+                lapper.merge_overlaps();
+                for iv in lapper.intervals {
+                    counter[iv.start] += 1;
+                    counter[iv.stop] -= 1;
+                }
+            }
+        }
+
+        // Sum the counter and merge same-depth ranges of positions
+        let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
+        self.sum_counter(counter, contig, start, stop)
+    }
+
+    fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+        // Create a reader
+        let mut reader =
+            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+
+        // If passed add ref_fasta
+        if let Some(ref_fasta) = &self.ref_fasta {
+            reader.set_reference(ref_fasta).expect("Set ref");
+        }
+
+        let header = reader.header().to_owned();
+        // fetch the region of interest
+        reader.fetch(tid, start, stop).expect("Fetched a region");
+
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut maties = HashMap::new();
+
+        // Walk over each read, counting the starts and ends
+        for record in reader
+            .records()
+            .map(|r| r.expect("Read record"))
+            .filter(|read| self.read_filter.filter_read(&read))
+        {
+            let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
+            let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
 
             // rectify start / stop with region boundaries
-            // increment the start of the region
-            if rec_start < start {
-                counter[0] += 1;
+            // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
+            let adjusted_start = if rec_start < start {
+                0
             } else {
-                let point = (rec_start - start) as usize;
-                counter[point] += 1;
-            }
+                (rec_start - start) as usize
+            };
 
-            // decrement the end of the region
-            if rec_stop > stop {
-                *(counter.last_mut().expect("Non zero size region")) -= 1;
+            let adjusted_stop = if rec_stop > stop {
+                counter.len() - 1
             } else {
-                let point = (rec_stop - start) as usize;
-                counter[point] -= 1;
+                (rec_stop - start) as usize
+            };
+
+            // check if this read has a mate that will be seen within this region
+            // that this works for both mates in pair
+            if self.mate_fix {
+                if Self::overlaps_mate(&record) {
+                    let qname =
+                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
+                    let intervals = maties.entry(qname).or_insert(vec![]);
+                    intervals.push(Interval {
+                        start: adjusted_start,
+                        stop: adjusted_stop,
+                        val: (),
+                    });
+                } else {
+                    counter[adjusted_start] += 1;
+                    counter[adjusted_stop] -= 1;
+                }
+            } else {
+                counter[adjusted_start] += 1;
+                counter[adjusted_stop] -= 1;
+            }
+        }
+
+        if self.mate_fix {
+            // check maties
+            for (_qname, ivs) in maties.drain() {
+                let mut lapper = Lapper::new(ivs);
+                lapper.merge_overlaps();
+                for iv in lapper.intervals {
+                    counter[iv.start] += 1;
+                    counter[iv.stop] -= 1;
+                }
             }
         }
 
@@ -327,7 +461,7 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
 struct IterAlignedBlocks {
     pos: i64,
     cigar_index: usize,
-    cigar: Vec<Cigar>
+    cigar: Vec<Cigar>,
 }
 
 impl Iterator for IterAlignedBlocks {
@@ -336,14 +470,14 @@ impl Iterator for IterAlignedBlocks {
         while self.cigar_index < self.cigar.len() {
             let entry = self.cigar[self.cigar_index];
             match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Del(len)  => {
+                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Del(len) => {
                     let out_pos = self.pos;
                     self.pos += len as i64;
                     self.cigar_index += 1;
                     return Some((out_pos, out_pos + len as i64));
                 }
                 Cigar::RefSkip(len) => self.pos += len as i64,
-                _ => ()
+                _ => (),
             }
             self.cigar_index += 1;
         }
@@ -457,22 +591,22 @@ mod tests {
 
     // Test that all regions of the test bam can be read and don't panic.
     #[rstest(
-        fast_mode => [true, false]
+        fast_mode => [true, false],
+        mate_fix => [true, false]
     )]
-    fn test_can_parse(fast_mode: bool, bamfile: (PathBuf, TempDir), read_filter: DefaultReadFilter) {
+    fn test_can_parse(
+        fast_mode: bool,
+        mate_fix: bool,
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+    ) {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, fast_mode, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, mate_fix, fast_mode, 0, read_filter);
 
-        let par_granges_runner = par_granges::ParGranges::new(
-            bamfile.0,
-            None,
-            None,
-            Some(cpus),
-            None,
-            simple_processor,
-        );
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -495,14 +629,32 @@ mod tests {
         let simple_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, 0, read_filter);
 
-        let par_granges_runner = par_granges::ParGranges::new(
-            bamfile.0,
-            None,
-            None,       // TODO - make a test with befile
-            Some(cpus), // TODO - parameterize over this
-            None,       // TODO - parameterize over this
-            simple_processor,
-        );
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                pos.push(p)
+            });
+        positions
+    }
+
+    #[fixture]
+    fn vanilla_positions_mate_fix(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<RangePositions>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        let simple_processor =
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, 0, read_filter);
+
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -522,23 +674,11 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = OnlyDepthProcessor::new(
-            bamfile.0.clone(),
-            None,
-            false, // mate aware
-            true,
-            0,
-            read_filter,
-        );
+        let simple_processor =
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, 0, read_filter);
 
-        let par_granges_runner = par_granges::ParGranges::new(
-            bamfile.0,
-            None,
-            None,
-            Some(cpus),
-            None,
-            simple_processor,
-        );
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -548,8 +688,30 @@ mod tests {
                 let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
                 pos.push(p)
             });
+        positions
+    }
 
-        // println!("{:?}", positions);
+    #[fixture]
+    fn fast_mode_positions_mate_fix(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<RangePositions>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        let simple_processor =
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, 0, read_filter);
+
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                pos.push(p)
+            });
         positions
     }
 
@@ -557,7 +719,9 @@ mod tests {
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_depths(positions: HashMap<String, Vec<RangePositions>>, awareness_modifier: usize) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
@@ -577,7 +741,9 @@ mod tests {
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_ranges(positions: HashMap<String, Vec<RangePositions>>, awareness_modifier: usize) {
         assert_eq!(positions.get("chr1").unwrap()[0].pos, 0);
@@ -609,19 +775,29 @@ mod tests {
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 2),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 2),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_filters(positions: HashMap<String, Vec<RangePositions>>, awareness_modifier: usize) {
         // Verify that a read that has flags saying it failed QC got filtered out
-        assert_eq!(positions.get("chr2").unwrap()[11 + awareness_modifier].depth, 1);
-        assert_eq!(positions.get("chr2").unwrap()[12 + awareness_modifier].depth, 0);
+        assert_eq!(
+            positions.get("chr2").unwrap()[11 + awareness_modifier].depth,
+            1
+        );
+        assert_eq!(
+            positions.get("chr2").unwrap()[12 + awareness_modifier].depth,
+            0
+        );
     }
 
     #[rstest(
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_depths_insertions(
         positions: HashMap<String, Vec<RangePositions>>,
@@ -637,7 +813,9 @@ mod tests {
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_depths_deletions(
         positions: HashMap<String, Vec<RangePositions>>,
@@ -652,13 +830,16 @@ mod tests {
         positions,
         awareness_modifier,
         case::vanilla(vanilla_positions(bamfile(), read_filter()), 1),
-        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0)
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 1),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 0)
     )]
     fn check_depths_refskips(
         positions: HashMap<String, Vec<RangePositions>>,
         awareness_modifier: usize,
     ) {
-        if awareness_modifier == 1 { // ref_skips are not being counted
+        if awareness_modifier == 1 {
+            // ref_skips are not being counted
             assert_eq!(positions.get("chr2").unwrap()[2].depth, 3); // noskips
             assert_eq!(positions.get("chr2").unwrap()[2].pos, 9);
             assert_eq!(positions.get("chr2").unwrap()[2].end, 12);
@@ -672,70 +853,78 @@ mod tests {
         }
     }
 
-    // #[rstest(
-    //     positions,
-    //     awareness_modifier,
-    //     case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
-    //     case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 1)
-    // )]
-    // fn check_mate_detection(
-    //     positions: HashMap<String, Vec<RangePositions>>,
-    //     awareness_modifier: usize,
-    // ) {
-    //     assert_eq!(positions.get("chr2").unwrap()[33].depth, 4);
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[34].depth,
-    //         4 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[35].depth,
-    //         4 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[36].depth,
-    //         4 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[37].depth,
-    //         4 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[38].depth,
-    //         4 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[39].depth,
-    //         2 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[40].depth,
-    //         2 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[41].depth,
-    //         2 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[42].depth,
-    //         2 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(
-    //         positions.get("chr2").unwrap()[43].depth,
-    //         2 - awareness_modifier
-    //     ); // mate overlap
-    //     assert_eq!(positions.get("chr2").unwrap()[44].depth, 1);
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 1)
+    )]
+    fn check_mate_detection_fast(
+        positions: HashMap<String, Vec<RangePositions>>,
+        awareness_modifier: usize,
+    ) {
+        assert_eq!(positions.get("chr2").unwrap()[5].depth, 4);
+        assert_eq!(positions.get("chr2").unwrap()[5].pos, 23);
+        if awareness_modifier == 1 {
+            assert_eq!(positions.get("chr2").unwrap()[5].end, 34);
 
-    //     // assert_eq!(positions.get("chr2").unwrap()[33].a, 4);
-    //     // assert_eq!(positions.get("chr2").unwrap()[34].a, 4 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[35].a, 4 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[36].a, 4 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[37].a, 4 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[38].a, 4 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[39].a, 2 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[40].a, 2 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[41].a, 2 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[42].a, 2 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[43].a, 2 - awareness_modifier); // mate overlap
-    //     // assert_eq!(positions.get("chr2").unwrap()[44].a, 1);
-    // }
+            assert_eq!(positions.get("chr2").unwrap()[6].pos, 34);
+            assert_eq!(positions.get("chr2").unwrap()[6].end, 39);
+            assert_eq!(positions.get("chr2").unwrap()[6].depth, 3);
+
+            assert_eq!(positions.get("chr2").unwrap()[7].pos, 39);
+            assert_eq!(positions.get("chr2").unwrap()[7].end, 49);
+            assert_eq!(positions.get("chr2").unwrap()[7].depth, 1);
+        } else {
+            assert_eq!(positions.get("chr2").unwrap()[5].end, 39);
+
+            assert_eq!(positions.get("chr2").unwrap()[6].pos, 39);
+            assert_eq!(positions.get("chr2").unwrap()[6].end, 44);
+            assert_eq!(positions.get("chr2").unwrap()[6].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[7].pos, 44);
+            assert_eq!(positions.get("chr2").unwrap()[7].end, 49);
+            assert_eq!(positions.get("chr2").unwrap()[7].depth, 1);
+        }
+        assert_eq!(positions.get("chr2").unwrap()[8].pos, 49);
+        assert_eq!(positions.get("chr2").unwrap()[8].end, 54);
+        assert_eq!(positions.get("chr2").unwrap()[8].depth, 2);
+    }
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 1)
+    )]
+    fn check_mate_detection_vanilla(
+        positions: HashMap<String, Vec<RangePositions>>,
+        awareness_modifier: usize,
+    ) {
+        assert_eq!(positions.get("chr2").unwrap()[7].depth, 4);
+        assert_eq!(positions.get("chr2").unwrap()[7].pos, 23);
+        if awareness_modifier == 1 {
+            assert_eq!(positions.get("chr2").unwrap()[7].end, 34);
+
+            assert_eq!(positions.get("chr2").unwrap()[8].pos, 34);
+            assert_eq!(positions.get("chr2").unwrap()[8].end, 39);
+            assert_eq!(positions.get("chr2").unwrap()[8].depth, 3);
+
+            assert_eq!(positions.get("chr2").unwrap()[9].pos, 39);
+            assert_eq!(positions.get("chr2").unwrap()[9].end, 49);
+            assert_eq!(positions.get("chr2").unwrap()[9].depth, 1);
+        } else {
+            assert_eq!(positions.get("chr2").unwrap()[7].end, 39);
+
+            assert_eq!(positions.get("chr2").unwrap()[8].pos, 39);
+            assert_eq!(positions.get("chr2").unwrap()[8].end, 44);
+            assert_eq!(positions.get("chr2").unwrap()[8].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[9].pos, 44);
+            assert_eq!(positions.get("chr2").unwrap()[9].end, 49);
+            assert_eq!(positions.get("chr2").unwrap()[9].depth, 1);
+        }
+        assert_eq!(positions.get("chr2").unwrap()[10].pos, 49);
+        assert_eq!(positions.get("chr2").unwrap()[10].end, 54);
+        assert_eq!(positions.get("chr2").unwrap()[10].depth, 2);
+    }
 }
