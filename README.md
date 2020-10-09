@@ -42,7 +42,7 @@ The output columns are as follows:
 | Column   | Description                                                                                        |
 | -------- | -------------------------------------------------------------------------------------------------- |
 | REF      | The reference sequence name                                                                        |
-| POS      | The 1-based position on the reference sequence                                                     |
+| POS      | The position on the reference sequence                                                             |
 | DEPTH    | The total depth at the position SUM(A, C, T, G, DEL)                                               |
 | A        | Total A nucleotides seen at this position                                                          |
 | C        | Total C nucleotides seen at this position                                                          |
@@ -95,24 +95,99 @@ tabix output.tsv.gz chr1:5-10
 Usage:
 
 ```text
-Usage: perbase simple-depth <reads> [-r <ref-fasta>] [-b <bed-file>] [-o <output>] [-t <threads>] [-c <chunksize>] [-f <include-flags>] [-F <exclude-flags>] [-m] [-q <min-mapq>]
+perbase-simple-depth
+Seth Stadick <sstadick@gmail.com>
+Calculate the depth at each base, per-nucleotide
 
-Calculate the depth at each base, per-nucleotide. Takes an indexed BAM/CRAM as <reads>.
+USAGE:
+    perbase simple-depth [FLAGS] [OPTIONS] <reads>
 
-Options:
-  -r, --ref-fasta   indexed reference fasta, set if using CRAM
-  -b, --bed-file    a BED file containing regions of interest. If specified,
-                    only bases from the given regions will be reported on
-  -o, --output      output path. DEFAULT: stdout
-  -t, --threads     the number of threads to use. DEFAULT: max_available
-  -c, --chunksize   the ideal number of basepairs each worker receives. Total bp
-                    in memory at one time is (threads - 2) * chunksize
-  -f, --include-flags
-                    SAM flags to include. DEFAULT: 0
-  -F, --exclude-flags
-                    SAM flags to exclude, recommended 3848. DEFAULT: 0
-  -m, --mate-fix    fix overlapping mates counts, see docs for full details.
-                    DEAFAULT: off
-  -q, --min-mapq    minimum mapq for a read to count toward depth. DEFAULT: 0
-  --help            display usage information
+FLAGS:
+    -h, --help         Prints help information
+    -m, --mate-fix     Fix overlapping mates counts, see docs for full details
+    -V, --version      Prints version information
+    -z, --zero-base    Output positions as 0-based instead of 1-based
+
+OPTIONS:
+    -b, --bed-file <bed-file>              A BED file containing regions of interest. If specified, only bases from the
+                                           given regions will be reported on
+    -c, --chunksize <chunksize>            The ideal number of basepairs each worker receives. Total bp in memory at one
+                                           time is (threads - 2) * chunksize
+    -F, --exclude-flags <exclude-flags>    SAM flags to exclude, recommended 3848 [default: 0]
+    -f, --include-flags <include-flags>    SAM flags to include [default: 0]
+    -q, --min-mapq <min-mapq>              Minimum MAPQ for a read to count toward depth [default: 0]
+    -o, --output <output>                  Output path, defaults to stdout
+    -r, --ref-fasta <ref-fasta>            Indexed reference fasta, set if using CRAM
+    -t, --threads <threads>                The number of threads to use [default: 16]
+
+ARGS:
+    <reads>    Input indexed BAM/CRAM to analyze
+```
+
+
+### only-depth
+
+The `only-depth` tool walks over the input BAM/CRAM file and caluclates the depth over all postions specified by either a BED file or in the BAM/CRAM header. Adjacent positions that have the same depth will be merged together to form a non-inclusive range (see example output).
+
+There are two distinct modes that `only-depth` can run in, gated by the `--fast-mode` flag. When running in fast-mode, only depth over the area a read covers is only determined by the reads start and end postions, and no cigar related info is taken into account. `--mate-fix` may still be used in this mode, and areas where mates overlap will not be counted twice.
+
+Without the `--fast-mode` flag, the depth at each position is determined in a manner similar to `simple-depth` where `DEL` will count toward depth, but `REF_SKIP` will not. Additionally, any reads that fail the `--exclude-flags` will not be counted toward depth. Lastly, `--mate-fix` can be applied to avoid counting regions twice where mates may overlap.
+
+For the fastest possible output, use `only-depth --fast-mode`. `--mate-fix` is more computational.
+
+**Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundry. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem.
+
+Example output of `perbase only-depth --mate-fix --zero-base  ./test/test.bam`:
+
+```text
+REF     POS     END     DEPTH
+chr2    0       4       1
+chr2    4       9       2
+chr2    9       12      3
+chr2    12      14      2
+chr2    14      17      3
+chr2    17      19      4
+chr2    19      23      5
+chr2    23      34      4
+chr2    34      39      3
+chr2    39      49      1
+chr2    49      54      2
+chr2    54      64      3
+chr2    64      74      4
+chr2    74      79      3
+chr2    79      84      2
+chr2    84      89      1
+```
+
+Usage:
+
+```text
+perbase-only-depth
+Seth Stadick <sstadick@gmail.com>
+Calculate the only the depth at each base
+
+USAGE:
+    perbase only-depth [FLAGS] [OPTIONS] <reads>
+
+FLAGS:
+    -x, --fast-mode    Calculate depth based only on read starts/stops, see docs for full details
+    -h, --help         Prints help information
+    -m, --mate-fix     Fix overlapping mates counts, see docs for full details
+    -V, --version      Prints version information
+    -z, --zero-base    Output positions as 0-based instead of 1-based
+
+OPTIONS:
+    -b, --bed-file <bed-file>              A BED file containing regions of interest. If specified, only bases from the
+                                           given regions will be reported on
+    -c, --chunksize <chunksize>            The ideal number of basepairs each worker receives. Total bp in memory at one
+                                           time is (threads - 2) * chunksize
+    -F, --exclude-flags <exclude-flags>    SAM flags to exclude, recommended 3848 [default: 0]
+    -f, --include-flags <include-flags>    SAM flags to include [default: 0]
+    -q, --min-mapq <min-mapq>              Minimum MAPQ for a read to count toward depth [default: 0]
+    -o, --output <output>                  Output path, defaults to stdout
+    -r, --ref-fasta <ref-fasta>            Indexed reference fasta, set if using CRAM
+    -t, --threads <threads>                The number of threads to use [default: 16]
+
+ARGS:
+    <reads>    Input indexed BAM/CRAM to analyze
 ```

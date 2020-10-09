@@ -69,6 +69,10 @@ pub struct OnlyDepth {
     #[structopt(long, short = "x")]
     fast_mode: bool,
 
+    /// Skip merging adjacent bases that have the same depth.
+    #[structopt(long, short = "n")]
+    no_merge: bool,
+
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
@@ -92,6 +96,7 @@ impl OnlyDepth {
             self.ref_fasta.clone(),
             self.mate_fix,
             self.fast_mode,
+            self.no_merge,
             if self.zero_base { 0 } else { 1 },
             read_filter,
         );
@@ -126,6 +131,21 @@ impl OnlyDepth {
             .delimiter(b'\t')
             .from_writer(raw_writer))
     }
+
+    /// Detect an overlap of mates
+    /// TODO: Add more tests for this
+    #[inline]
+    fn maybe_overlaps_mate(record: &bam::Record) -> bool {
+        if !record.is_paired() || record.tid() != record.mtid() {
+            return false;
+        }
+        let tlen = record.insert_size().abs();
+        let read_len = record.reference_end() - record.reference_start();
+        // if the half the tlen is less than the readlen, or the mate start is less than one readlen away, concider for mate detection
+        // (is there any scenario where this is not true?)
+        // This is a heuristic, so it just have to never have a false negative and not have false positives > N% of the time
+        (tlen / 2) < read_len || (record.mpos() - record.pos()).abs() < read_len
+    }
 }
 
 /// Holds the info needed for [par_io::RegionProcessor] implementation
@@ -138,6 +158,8 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     mate_fix: bool,
     /// Indicate whether or not to run in fastmode, only using read starts and stops
     fast_mode: bool,
+    /// Indicate whether or not to merge adjacent positions that have the same depth
+    no_merge: bool,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
     /// 0-based or 1-based coordinate output
@@ -151,6 +173,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         ref_fasta: Option<PathBuf>,
         mate_fix: bool,
         fast_mode: bool,
+        no_merge: bool,
         coord_base: usize,
         read_filter: F,
     ) -> Self {
@@ -159,6 +182,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             ref_fasta,
             fast_mode,
             mate_fix,
+            no_merge,
             coord_base,
             read_filter,
         }
@@ -172,19 +196,33 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         region_start: u64,
         region_stop: u64,
     ) -> Vec<RangePositions> {
-        // Sum the counter and merge same-depth ranges of positions
-        let mut sum: i32 = 0;
-        let mut results = vec![];
-        let mut curr_start = 0;
-        let mut curr_depth = counter[0];
-        for (i, count) in counter.iter().enumerate() {
-            sum += count;
-            // freeze pos and start new one
-            if curr_depth != sum {
-                let mut pos =
-                    RangePositions::new(String::from(contig), curr_start + self.coord_base);
-                pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
-                pos.end = region_start as usize + i + self.coord_base;
+        if self.no_merge {
+            let mut sum: i32 = 0;
+            let mut results = vec![];
+            for (i, count) in counter.iter().enumerate() {
+                sum += count;
+                if sum != 0 {
+                    let mut pos = RangePositions::new(String::from(contig), region_start as usize + i + self.coord_base);
+                    pos.depth = usize::try_from(sum).expect("All depths are positive");
+                    pos.end = region_start as usize + i + self.coord_base + 1;
+                    results.push(pos);
+                }
+            }
+            results
+        } else {
+            // Sum the counter and merge same-depth ranges of positions
+            let mut sum: i32 = 0;
+            let mut results = vec![];
+            let mut curr_start = region_start as usize;
+            let mut curr_depth = counter[0];
+            for (i, count) in counter.iter().enumerate() {
+                sum += count;
+                // freeze pos and start new one
+                if curr_depth != sum {
+                    let mut pos =
+                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
+                    pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
+                    pos.end = region_start as usize + i + self.coord_base;
 
                 curr_start = region_start as usize + i;
                 curr_depth = sum;
@@ -192,73 +230,12 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             }
         }
 
-        let mut pos = RangePositions::new(String::from(contig), curr_start);
-        pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
-        pos.end = region_stop as usize + self.coord_base;
-        results.push(pos);
-        results
-    }
-
-    // TODO: Add to docs explaining how this mode is different, and how you may end up with some regions the are same-same due to threads
-    //   TODO: if that is a concern, either make a bedfile with exact regions you care about, or set chunksize to > biggest chr size
-    // TODO: Make it possible to turn off adjacent mergeing
-    // fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
-    //     // Create a reader
-    //     let mut reader =
-    //         bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
-
-    //     // If passed add ref_fasta
-    //     if let Some(ref_fasta) = &self.ref_fasta {
-    //         reader.set_reference(ref_fasta).expect("Set ref");
-    //     }
-
-    //     let header = reader.header().to_owned();
-    //     // fetch the region of interest
-    //     reader.fetch(tid, start, stop).expect("Fetched a region");
-
-    //     let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-
-    //     // Walk over each read, counting the starts and ends
-    //     for record in reader
-    //         .records()
-    //         .map(|r| r.expect("Read record"))
-    //         .filter(|read| self.read_filter.filter_read(&read))
-    //     {
-    //         let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
-    //         let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
-
-    //         // rectify start / stop with region boundaries
-    //         // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
-    //         if rec_start < start {
-    //             counter[0] += 1;
-    //         } else {
-    //             let point = (rec_start - start) as usize;
-    //             counter[point] += 1;
-    //         }
-
-    //         // decrement the end of the region
-    //         if rec_stop > stop {
-    //             *(counter.last_mut().expect("Non zero size region")) -= 1;
-    //         } else {
-    //             let point = (rec_stop - start) as usize;
-    //             counter[point] -= 1;
-    //         }
-    //     }
-
-    //     // Sum the counter and merge same-depth ranges of positions
-    //     let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-    //     self.sum_counter(counter, contig, start, stop)
-    // }
-
-    /// Detect an overlap of mates
-    #[inline]
-    fn overlaps_mate(record: &bam::Record) -> bool {
-        if !record.is_paired() || record.tid() != record.mtid() {
-            return false;
+            let mut pos = RangePositions::new(String::from(contig), curr_start);
+            pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
+            pos.end = region_stop as usize + self.coord_base;
+            results.push(pos);
+            results
         }
-        let tlen = record.insert_size().abs();
-        let read_len = record.reference_end() - record.reference_start();
-        (tlen / 2) < read_len
     }
 
     /// Process a region, taking into account REF_SKIPs and mates
@@ -284,61 +261,45 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             .records()
             .map(|r| r.expect("Read record"))
             .filter(|read| self.read_filter.filter_read(&read))
+            .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
         {
-            // Decide if the mate may overlap
-            let mate_overlap = if self.mate_fix {
-                Self::overlaps_mate(&record)
+            let rec_start = u64::try_from(record.0).expect("check overflow");
+            let rec_stop = u64::try_from(record.1).expect("check overflow");
+
+            // NB: since we are splitting the region, it's possible the region we are looking at
+            // may occur before the ROI, or after the ROI
+            if rec_start > stop || start > rec_stop {
+                continue;
+            }
+
+            // rectify start / stop with region boundaries
+            // increment the start of the region
+            let adjusted_start = if rec_start < start {
+                0
             } else {
-                false
+                (rec_start - start) as usize
             };
-            info!("Mate overlap? for {:?} - {:?}", record, mate_overlap);
 
-            // TODO: Find non-allocating way of doing this
-            let iter = IterAlignedBlocks {
-                pos: record.reference_start(),
-                cigar_index: 0,
-                cigar: record.cigar().to_vec(),
+            let adjusted_stop = if rec_stop > stop {
+                counter.len() - 1
+            } else {
+                (rec_stop - start) as usize
             };
-            for block in iter {
-                let rec_start = u64::try_from(block.0).expect("check overflow");
-                let rec_stop = u64::try_from(block.1).expect("check overflow");
 
-                // NB: since we are splitting the region, it's possible the region we are looking at
-                // may occur before the ROI, or after the ROI
-                if rec_start > stop || start > rec_stop {
-                    continue;
-                }
-
-                // rectify start / stop with region boundaries
-                // increment the start of the region
-                let adjusted_start = if rec_start < start {
-                    0
-                } else {
-                    (rec_start - start) as usize
-                };
-
-                let adjusted_stop = if rec_stop > stop {
-                    counter.len() - 1
-                } else {
-                    (rec_stop - start) as usize
-                };
-
-                // check if this read has a mate that will be seen within this region
-                // that this works for both mates in pair
-                if mate_overlap {
-                    // TODO: figure out better way of passing qname around, get rid of Lazy
-                    let qname =
-                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
-                    let intervals = maties.entry(qname).or_insert(vec![]);
-                    intervals.push(Interval {
-                        start: adjusted_start,
-                        stop: adjusted_stop,
-                        val: (),
-                    });
-                } else {
-                    counter[adjusted_start] += 1;
-                    counter[adjusted_stop] -= 1;
-                }
+            // check if this read has a mate that will be seen within this region
+            // that this works for both mates in pair
+            if self.mate_fix && record.2 {
+                // TODO: figure out better way of passing qname around, get rid of Lazy
+                // let qname = String::from(std::str::from_utf8(record.3).expect("Convert qname"));
+                let intervals = maties.entry(record.3).or_insert(vec![]);
+                intervals.push(Interval {
+                    start: adjusted_start,
+                    stop: adjusted_stop,
+                    val: (),
+                });
+            } else {
+                counter[adjusted_start] += 1;
+                counter[adjusted_stop] -= 1;
             }
         }
 
@@ -400,21 +361,15 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             };
 
             // check if this read has a mate that will be seen within this region
-            // that this works for both mates in pair
-            if self.mate_fix {
-                if Self::overlaps_mate(&record) {
-                    let qname =
-                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
-                    let intervals = maties.entry(qname).or_insert(vec![]);
-                    intervals.push(Interval {
-                        start: adjusted_start,
-                        stop: adjusted_stop,
-                        val: (),
-                    });
-                } else {
-                    counter[adjusted_start] += 1;
-                    counter[adjusted_stop] -= 1;
-                }
+            if self.mate_fix && OnlyDepth::maybe_overlaps_mate(&record) {
+                let qname =
+                    String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
+                let intervals = maties.entry(qname).or_insert(vec![]);
+                intervals.push(Interval {
+                    start: adjusted_start,
+                    stop: adjusted_stop,
+                    val: (),
+                });
             } else {
                 counter[adjusted_start] += 1;
                 counter[adjusted_stop] -= 1;
@@ -458,14 +413,34 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
 }
 
 // A tweaked impl of IterAlignedBlocks from [here](https://github.com/rust-bio/rust-htslib/blob/9175d3ca186baef4f84a7d7ccb27869b43471e36/src/bam/ext.rs#L51)
+// Not that this will also hang onto the bam::Record and supplies the qname for each thing returned.
+// At the end of the day this shouldn't be the worst since any given read should not have that many splits in it
 struct IterAlignedBlocks {
     pos: i64,
     cigar_index: usize,
-    cigar: Vec<Cigar>,
+    cigar: bam::record::CigarStringView,
+    overlap_status: bool,
+    record: bam::Record,
+}
+impl IterAlignedBlocks {
+    fn new(record: bam::Record, check_mate: bool) -> Self {
+        let overlap = if check_mate {
+            OnlyDepth::maybe_overlaps_mate(&record)
+        } else {
+            false
+        };
+        Self {
+            pos: record.reference_start(),
+            cigar_index: 0,
+            cigar: record.cigar(),
+            overlap_status: overlap,
+            record,
+        }
+    }
 }
 
 impl Iterator for IterAlignedBlocks {
-    type Item = (i64, i64);
+    type Item = (i64, i64, bool, String);
     fn next(&mut self) -> Option<Self::Item> {
         while self.cigar_index < self.cigar.len() {
             let entry = self.cigar[self.cigar_index];
@@ -474,7 +449,14 @@ impl Iterator for IterAlignedBlocks {
                     let out_pos = self.pos;
                     self.pos += len as i64;
                     self.cigar_index += 1;
-                    return Some((out_pos, out_pos + len as i64));
+                    return Some((
+                        out_pos,
+                        out_pos + len as i64,
+                        self.overlap_status,
+                        String::from(
+                            std::str::from_utf8(self.record.qname()).expect("Convert qname"),
+                        ),
+                    ));
                 }
                 Cigar::RefSkip(len) => self.pos += len as i64,
                 _ => (),
@@ -507,7 +489,7 @@ mod tests {
     #[fixture]
     fn bamfile() -> (PathBuf, TempDir) {
         // No longer - This keep the test bam up to date
-        // let test_path = PathBuf::from("test/test.bam");
+        // let path = PathBuf::from("test/test.bam");
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("test.bam");
 
@@ -550,9 +532,10 @@ mod tests {
             Record::from_sam(&view, b"THREE\t67\tchr2\t10\t40\t3M5N22M\tchr2\t60\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // Mismatch
             Record::from_sam(&view, b"FOUR\t67\tchr2\t15\t40\t25M\tchr2\t65\t75\tATAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            // Overlapping mates
+            // Overlapping mates a then b
             Record::from_sam(&view, b"FIVE\t67\tchr2\t20\t40\t25M\tchr2\t35\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
-            Record::from_sam(&view, b"FIVE\t147\tchr2\t35\t40\t25M\tchr2\t20\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr2\t35\t40\t25M\tchr2\t20\t-40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
 
             // Other base
             Record::from_sam(&view, b"ONE\t147\tchr2\t50\t40\t25M\tchr2\t1\t75\tAAAAAAAAAAAAAAAAAAAAAYAAA\t#########################").unwrap(),
@@ -561,6 +544,14 @@ mod tests {
             Record::from_sam(&view, b"THREE\t147\tchr2\t60\t40\t25M\tchr2\t10\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
             // A failure of QC
             Record::from_sam(&view, b"FOUR\t659\tchr2\t65\t40\t25M\tchr2\t15\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
+            // Overlapping mates exact overlap - calling proper pair, dubious
+            Record::from_sam(&view, b"SIX\t67\tchr2\t120\t40\t25M\tchr2\t120\t40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"SIX\t147\tchr2\t120\t40\t25M\tchr2\t120\t-40\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+
+            // Overlapping mates a contains b - calling proper pair, dubious
+            Record::from_sam(&view, b"SEVEN\t67\tchr2\t160\t40\t50M\tchr2\t150\t50\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\t##################################################").unwrap(),
+            Record::from_sam(&view, b"SEVEN\t147\tchr2\t175\t40\t25M\tchr2\t175\t-50\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
 
             // Chr3, weird inter-seq breakpoints
             // Huge skip at start
@@ -603,7 +594,7 @@ mod tests {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, mate_fix, fast_mode, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, mate_fix, fast_mode, false, 0, read_filter);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
@@ -627,7 +618,7 @@ mod tests {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, false, 0, read_filter);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
@@ -651,7 +642,7 @@ mod tests {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, false, 0, read_filter);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
@@ -675,7 +666,7 @@ mod tests {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, false, 0, read_filter);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
@@ -699,7 +690,7 @@ mod tests {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
         let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, 0, read_filter);
+            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, false, 0, read_filter);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
@@ -875,6 +866,14 @@ mod tests {
             assert_eq!(positions.get("chr2").unwrap()[7].pos, 39);
             assert_eq!(positions.get("chr2").unwrap()[7].end, 49);
             assert_eq!(positions.get("chr2").unwrap()[7].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[13].pos, 119);
+            assert_eq!(positions.get("chr2").unwrap()[13].end, 144);
+            assert_eq!(positions.get("chr2").unwrap()[13].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[15].pos, 159);
+            assert_eq!(positions.get("chr2").unwrap()[15].end, 209);
+            assert_eq!(positions.get("chr2").unwrap()[15].depth, 1);
         } else {
             assert_eq!(positions.get("chr2").unwrap()[5].end, 39);
 
@@ -885,6 +884,22 @@ mod tests {
             assert_eq!(positions.get("chr2").unwrap()[7].pos, 44);
             assert_eq!(positions.get("chr2").unwrap()[7].end, 49);
             assert_eq!(positions.get("chr2").unwrap()[7].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[13].pos, 119);
+            assert_eq!(positions.get("chr2").unwrap()[13].end, 144);
+            assert_eq!(positions.get("chr2").unwrap()[13].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[15].pos, 159);
+            assert_eq!(positions.get("chr2").unwrap()[15].end, 174);
+            assert_eq!(positions.get("chr2").unwrap()[15].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[16].pos, 174);
+            assert_eq!(positions.get("chr2").unwrap()[16].end, 199);
+            assert_eq!(positions.get("chr2").unwrap()[16].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[17].pos, 199);
+            assert_eq!(positions.get("chr2").unwrap()[17].end, 209);
+            assert_eq!(positions.get("chr2").unwrap()[17].depth, 1);
         }
         assert_eq!(positions.get("chr2").unwrap()[8].pos, 49);
         assert_eq!(positions.get("chr2").unwrap()[8].end, 54);
@@ -912,6 +927,14 @@ mod tests {
             assert_eq!(positions.get("chr2").unwrap()[9].pos, 39);
             assert_eq!(positions.get("chr2").unwrap()[9].end, 49);
             assert_eq!(positions.get("chr2").unwrap()[9].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[15].pos, 119);
+            assert_eq!(positions.get("chr2").unwrap()[15].end, 144);
+            assert_eq!(positions.get("chr2").unwrap()[15].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[17].pos, 159);
+            assert_eq!(positions.get("chr2").unwrap()[17].end, 209);
+            assert_eq!(positions.get("chr2").unwrap()[17].depth, 1)
         } else {
             assert_eq!(positions.get("chr2").unwrap()[7].end, 39);
 
@@ -922,6 +945,22 @@ mod tests {
             assert_eq!(positions.get("chr2").unwrap()[9].pos, 44);
             assert_eq!(positions.get("chr2").unwrap()[9].end, 49);
             assert_eq!(positions.get("chr2").unwrap()[9].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[15].pos, 119);
+            assert_eq!(positions.get("chr2").unwrap()[15].end, 144);
+            assert_eq!(positions.get("chr2").unwrap()[15].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[17].pos, 159);
+            assert_eq!(positions.get("chr2").unwrap()[17].end, 174);
+            assert_eq!(positions.get("chr2").unwrap()[17].depth, 1);
+
+            assert_eq!(positions.get("chr2").unwrap()[18].pos, 174);
+            assert_eq!(positions.get("chr2").unwrap()[18].end, 199);
+            assert_eq!(positions.get("chr2").unwrap()[18].depth, 2);
+
+            assert_eq!(positions.get("chr2").unwrap()[19].pos, 199);
+            assert_eq!(positions.get("chr2").unwrap()[19].end, 209);
+            assert_eq!(positions.get("chr2").unwrap()[19].depth, 1)
         }
         assert_eq!(positions.get("chr2").unwrap()[10].pos, 49);
         assert_eq!(positions.get("chr2").unwrap()[10].end, 54);
