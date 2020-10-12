@@ -619,7 +619,7 @@ mod tests {
     ) {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = OnlyDepthProcessor::new(
+        let onlydepth_processor = OnlyDepthProcessor::new(
             bamfile.0.clone(),
             None,
             mate_fix,
@@ -635,7 +635,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
-            simple_processor,
+            onlydepth_processor,
         );
         let mut positions = HashMap::new();
         par_granges_runner
@@ -656,7 +656,7 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor =
+        let onlydepth_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, false, 0, read_filter);
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -665,7 +665,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
-            simple_processor,
+            onlydepth_processor,
         );
         let mut positions = HashMap::new();
         par_granges_runner
@@ -686,7 +686,7 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor =
+        let onlydepth_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, false, 0, read_filter);
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -695,7 +695,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
-            simple_processor,
+            onlydepth_processor,
         );
         let mut positions = HashMap::new();
         par_granges_runner
@@ -716,11 +716,17 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor =
+        let onlydepth_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, false, 0, read_filter);
 
-        let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            Some(cpus),
+            None,
+            onlydepth_processor,
+        );
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -740,11 +746,17 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor =
+        let onlydepth_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, false, 0, read_filter);
 
-        let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            Some(cpus),
+            None,
+            onlydepth_processor,
+        );
         let mut positions = HashMap::new();
         par_granges_runner
             .process()

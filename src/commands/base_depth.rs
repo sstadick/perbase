@@ -1,6 +1,6 @@
-//! # Simple Depth
+//! # Base Depth
 //!
-//! Simple single pass over bam file to calculate depth at each position
+//! Base single pass over bam file to calculate depth at each position
 //! as well as depth per nucleotide. Additionally counts the number of
 //! insertions / deletions at each position.
 use anyhow::Result;
@@ -25,7 +25,7 @@ use termcolor::ColorChoice;
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
 #[structopt(author)]
-pub struct SimpleDepth {
+pub struct BaseDepth {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
 
@@ -70,16 +70,16 @@ pub struct SimpleDepth {
     zero_base: bool,
 }
 
-impl SimpleDepth {
+impl BaseDepth {
     pub fn run(self) -> Result<()> {
-        info!("Running simple-depth on: {:?}", self.reads);
+        info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
         let mut writer = self.get_writer()?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
-        let simple_processor = SimpleProcessor::new(
+        let base_processor = BaseProcessor::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
@@ -93,7 +93,7 @@ impl SimpleDepth {
             self.bed_file.clone(),
             Some(cpus),
             self.chunksize.clone(),
-            simple_processor,
+            base_processor,
         );
 
         let receiver = par_granges_runner.process()?;
@@ -120,7 +120,7 @@ impl SimpleDepth {
 }
 
 /// Holds the info needed for [par_io::RegionProcessor] implementation
-struct SimpleProcessor<F: ReadFilter> {
+struct BaseProcessor<F: ReadFilter> {
     /// path to indexed BAM/CRAM
     reads: PathBuf,
     /// path to indexed ref file
@@ -133,8 +133,8 @@ struct SimpleProcessor<F: ReadFilter> {
     read_filter: F,
 }
 
-impl<F: ReadFilter> SimpleProcessor<F> {
-    /// Create a new SimpleProcessor
+impl<F: ReadFilter> BaseProcessor<F> {
+    /// Create a new BaseProcessor
     fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -152,9 +152,9 @@ impl<F: ReadFilter> SimpleProcessor<F> {
     }
 }
 
-/// Implement [par_io::RegionProcessor] for [SimpleProcessor]
-impl<F: ReadFilter> RegionProcessor for SimpleProcessor<F> {
-    /// Objects of [pipeup_position::PileupPosition] will be returned by each call to [SimpleProcessor::process_region]
+/// Implement [par_io::RegionProcessor] for [BaseProcessor]
+impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
+    /// Objects of [pipeup_position::PileupPosition] will be returned by each call to [BaseProcessor::process_region]
     type P = PileupPosition;
 
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
@@ -287,16 +287,10 @@ mod tests {
     ) -> HashMap<String, Vec<PileupPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = SimpleProcessor::new(bamfile.0.clone(), None, false, 1, read_filter);
+        let base_processor = BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter);
 
-        let par_granges_runner = par_granges::ParGranges::new(
-            bamfile.0,
-            None,
-            None,
-            Some(cpus),
-            None,
-            simple_processor,
-        );
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -316,7 +310,7 @@ mod tests {
     ) -> HashMap<String, Vec<PileupPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor = SimpleProcessor::new(
+        let base_processor = BaseProcessor::new(
             bamfile.0.clone(),
             None,
             true, // mate aware
@@ -324,14 +318,8 @@ mod tests {
             read_filter,
         );
 
-        let par_granges_runner = par_granges::ParGranges::new(
-            bamfile.0,
-            None,
-            None,
-            Some(cpus),
-            None,
-            simple_processor,
-        );
+        let par_granges_runner =
+            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()

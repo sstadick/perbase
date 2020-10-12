@@ -31,9 +31,9 @@ You can also download a binary from the [releases](https://github.com/sstadick/p
 
 ## Tools
 
-### simple-depth
+### base-depth
 
-The `simple-depth` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
+The `base-depth` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
 
 The output columns are as follows:
 
@@ -53,7 +53,7 @@ The output columns are as follows:
 | FAIL     | Total reads failing filters that covered this position (their bases were not counted toward depth) |
 
 ```bash
-perbase simple-depth ./test/test.bam
+perbase base-depth ./test/test.bam
 ```
 
 Example output
@@ -84,7 +84,7 @@ If the `--mate-fix` flag is passed, each position will first check if there are 
 The output can be compressed and indexed as follows:
 
 ```bash
-perbase simple-depth ./test/test.bam | bgzip > output.tsv.gz
+perbase base-depth ./test/test.bam | bgzip > output.tsv.gz
 tabix -S 1 -s 1 -b 2 -e 2 ./output.tsv.gz
 # Query all positions overlapping region
 tabix output.tsv.gz chr1:5-10
@@ -96,7 +96,7 @@ Usage:
 Calculate the depth at each base, per-nucleotide
 
 USAGE:
-    perbase simple-depth [FLAGS] [OPTIONS] <reads>
+    perbase base-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
     -h, --help         Prints help information
@@ -126,7 +126,7 @@ The `only-depth` tool walks over the input BAM/CRAM file and calculates the dept
 
 There are two distinct modes that `only-depth` can run in, gated by the `--fast-mode` flag. When running in fast-mode, only depth over the area a read covers is only determined by the reads start and end postions, and no cigar related info is taken into account. `--mate-fix` may still be used in this mode, and areas where mates overlap will not be counted twice.
 
-Without the `--fast-mode` flag, the depth at each position is determined in a manner similar to `simple-depth` where `DEL` will count toward depth, but `REF_SKIP` will not. Additionally, any reads that fail the `--exclude-flags` will not be counted toward depth. Lastly, `--mate-fix` can be applied to avoid counting regions twice where mates may overlap.
+Without the `--fast-mode` flag, the depth at each position is determined in a manner similar to `base-depth` where `DEL` will count toward depth, but `REF_SKIP` will not. Additionally, any reads that fail the `--exclude-flags` will not be counted toward depth. Lastly, `--mate-fix` can be applied to avoid counting regions twice where mates may overlap.
 
 Regarding mate fixes, `perbase` will will "fixes" based only on the counted regions in a read. For example, if you have a read that goes from "chr1:10-1000" with a CIGAR of "25M974N1M", and the mate alignes nicely at "chr1:45-70" with CIGAR "25M", the mate will count toward the depth over "chr1:45-74". This is in contrast to other tools that will reject the mate even though it overlaps a region of R1 that is not counted toward depth.
 

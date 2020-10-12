@@ -17,17 +17,17 @@ struct Args {
 
 #[derive(StructOpt)]
 enum Subcommand {
-    SimpleDepth(simple_depth::SimpleDepth),
+    BaseDepth(base_depth::BaseDepth),
     OnlyDepth(only_depth::OnlyDepth),
-    MergeAdjacent(merge_adjacent::MergeAdjacent)
+    MergeAdjacent(merge_adjacent::MergeAdjacent),
 }
 
 impl Subcommand {
     fn run(self) -> Result<()> {
         match self {
-            Subcommand::SimpleDepth(x) => x.run()?,
+            Subcommand::BaseDepth(x) => x.run()?,
             Subcommand::OnlyDepth(x) => x.run()?,
-            Subcommand::MergeAdjacent(x) => x.run()?
+            Subcommand::MergeAdjacent(x) => x.run()?,
         }
         Ok(())
     }
