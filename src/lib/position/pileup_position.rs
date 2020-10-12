@@ -1,6 +1,6 @@
-//! # Position
-//!
-//! A module for accumlating and serializing all information about a genomic position.
+//! An implementation of `Position` for dealing with pileups.
+use crate::position::Position;
+use crate::read_filter::ReadFilter;
 use itertools::Itertools;
 use rust_htslib::bam::{
     self,
@@ -11,24 +11,10 @@ use serde::Serialize;
 use smartstring::alias::String;
 use std::{cmp::Ordering, default};
 
-// TODOs:
-// Write my own pilelup engine
-// Reference base
-// Average base quality
-// Average map quality
-// Average dist to ends
-// A calculated error rate based on mismatches?
-// Optionally display read names at the position?
-
-/// Anything that implements ReadFilter can apply a filter set to read
-pub trait ReadFilter {
-    /// filters a read, true is pass, false if fail
-    fn filter_read(&self, read: &Record) -> bool;
-}
 /// Hold all information about a position.
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub struct Position {
+pub struct PileupPosition {
     /// Reference sequence name.
     #[serde(rename = "REF")]
     pub ref_seq: String,
@@ -57,16 +43,19 @@ pub struct Position {
     pub fail: usize,
 }
 
-impl Position {
+impl Position  for PileupPosition {
     /// Create a new position for the given ref_seq name.
-    pub fn new(ref_seq: String, pos: usize) -> Self {
-        Position {
+    fn new(ref_seq: String, pos: usize) -> Self {
+        PileupPosition {
             ref_seq,
             pos,
             ..default::Default::default()
         }
     }
+}
 
+
+impl PileupPosition {
     /// Given a record, update the counts at this position
     fn update<F: ReadFilter>(&mut self, alignment: &Alignment, record: Record, read_filter: &F) {
         if !read_filter.filter_read(&record) {
@@ -103,7 +92,7 @@ impl Position {
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    /// It will also count the number of Ins/Dels/Skips that are at each position.
     ///
     /// # Arguments
     ///
@@ -117,7 +106,7 @@ impl Position {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
         pos.depth = pileup.depth() as usize;
 
         for alignment in pileup.alignments() {
@@ -130,7 +119,8 @@ impl Position {
     /// Convert a pileup into a `Position`.
     ///
     /// This will walk over each of the alignments and count the number each nucleotide it finds.
-    /// It will also count the number of Ins/Dels/Skips that are at each position. The output of this 1-based.
+    /// It will also count the number of Ins/Dels/Skips that are at each position.
+    ///
     /// Additionally, this method is mate aware. Before processing a position it will scan the alignments for mates.
     /// If a mate is found, it will try to take use the mate that has the highest MAPQ, breaking ties by choosing the
     /// first in pair that passes filters. In the event of both failing filters or not being first in pair, the first
@@ -148,7 +138,7 @@ impl Position {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos() + 1) as usize);
+        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
         pos.depth = pileup.depth() as usize;
 
         // Group records by qname

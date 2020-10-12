@@ -135,7 +135,10 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 };
 
                 // The number positions to try to process in one batch
-                let serial_step_size = self.chunksize.checked_mul(self.threads).unwrap_or(usize::MAX); // aka superchunk
+                let serial_step_size = self
+                    .chunksize
+                    .checked_mul(self.threads)
+                    .unwrap_or(usize::MAX); // aka superchunk
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
                     let tid_end = header.target_len(tid).unwrap() as u64;
@@ -234,12 +237,12 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
 mod test {
     use super::*;
     use bio::io::bed;
+    use num_cpus;
     use proptest::prelude::*;
     use rust_htslib::bam;
     use rust_lapper::{Interval, Lapper};
-    use tempfile::tempdir;
     use std::collections::HashMap;
-    use num_cpus;
+    use tempfile::tempdir;
     // The purpose of these tests is to demonstrate that positions are covered once under a variety of circumstances
 
     prop_compose! {
@@ -256,7 +259,7 @@ mod test {
     }
     // Create an arbitrary number of intervals along with the expected number of positions they cover
     fn arb_ivs(
-        max_iv: u64, // max iv size
+        max_iv: u64,    // max iv size
         max_ivs: usize, // max number of intervals
     ) -> impl Strategy<Value = (Vec<Interval<u64, ()>>, u64, u64)> {
         prop::collection::vec(arb_iv(max_iv), 0..max_ivs).prop_map(|vec| {
@@ -274,7 +277,7 @@ mod test {
     // Create arbitrary number of contigs with arbitrary intervals each
     fn arb_chrs(
         max_chr: usize, // number of chromosomes to use
-        max_iv: u64, // max interval size
+        max_iv: u64,    // max interval size
         max_ivs: usize, // max number of intervals
     ) -> impl Strategy<Value = Vec<(Vec<Interval<u64, ()>>, u64, u64)>> {
         prop::collection::vec(arb_ivs(max_iv, max_ivs), 0..max_chr)
@@ -328,7 +331,7 @@ mod test {
             );
             let receiver = par_granges_runner.process().expect("Launch ParGranges Process");
             let mut chrom_counts = HashMap::new();
-            receiver.into_iter().for_each(|p: Position| {
+            receiver.into_iter().for_each(|p: PileupPosition| {
                 let positions = chrom_counts.entry(p.ref_seq.parse::<usize>().expect("parsed chr")).or_insert(0u64);
                 *positions += 1
             });
@@ -347,17 +350,17 @@ mod test {
         }
     }
 
-    use crate::position::Position;
+    use crate::position::{pileup_position::PileupPosition, Position};
     use smartstring::SmartString;
     struct TestProcessor {}
     impl RegionProcessor for TestProcessor {
-        type P = Position;
+        type P = PileupPosition;
 
         fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
             let mut results = vec![];
             for i in start..stop {
                 let chr = SmartString::from(&tid.to_string());
-                let pos = Position::new(chr, i as usize);
+                let pos = PileupPosition::new(chr, i as usize);
                 results.push(pos);
             }
             results
