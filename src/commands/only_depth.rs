@@ -202,7 +202,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             for (i, count) in counter.iter().enumerate() {
                 sum += count;
                 if sum != 0 {
-                    let mut pos = RangePositions::new(String::from(contig), region_start as usize + i + self.coord_base);
+                    let mut pos = RangePositions::new(
+                        String::from(contig),
+                        region_start as usize + i + self.coord_base,
+                    );
                     pos.depth = usize::try_from(sum).expect("All depths are positive");
                     pos.end = region_start as usize + i + self.coord_base + 1;
                     results.push(pos);
@@ -224,16 +227,20 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                     pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
                     pos.end = region_start as usize + i + self.coord_base;
 
-                curr_start = region_start as usize + i;
-                curr_depth = sum;
-                results.push(pos);
-            }
-        }
+                    curr_start = region_start as usize + i;
+                    curr_depth = sum;
+                    results.push(pos);
+                }
 
-            let mut pos = RangePositions::new(String::from(contig), curr_start);
-            pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
-            pos.end = region_stop as usize + self.coord_base;
-            results.push(pos);
+                if i == counter.len() - 1 {
+                    // We've hit the end
+                    let mut pos =
+                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
+                    pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
+                    pos.end = region_stop as usize + self.coord_base;
+                    results.push(pos);
+                }
+            }
             results
         }
     }
@@ -280,7 +287,9 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 (rec_start - start) as usize
             };
 
-            let adjusted_stop = if rec_stop > stop {
+            let mut dont_count_stop = false; // if this interval extends past the end of the region, don't count an end for it
+            let adjusted_stop = if rec_stop >= stop {
+                dont_count_stop = true;
                 counter.len() - 1
             } else {
                 (rec_stop - start) as usize
@@ -295,11 +304,14 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 intervals.push(Interval {
                     start: adjusted_start,
                     stop: adjusted_stop,
-                    val: (),
+                    val: dont_count_stop,
                 });
             } else {
                 counter[adjusted_start] += 1;
-                counter[adjusted_stop] -= 1;
+                if !dont_count_stop {
+                    // check if the end of interval extended past region end
+                    counter[adjusted_stop] -= 1;
+                }
             }
         }
 
@@ -310,7 +322,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 lapper.merge_overlaps();
                 for iv in lapper.intervals {
                     counter[iv.start] += 1;
-                    counter[iv.stop] -= 1;
+                    if !iv.val {
+                        // check if the end of interval extended past region end
+                        counter[iv.stop] -= 1;
+                    }
                 }
             }
         }
@@ -354,7 +369,9 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 (rec_start - start) as usize
             };
 
-            let adjusted_stop = if rec_stop > stop {
+            let mut dont_count_stop = false; // set this flag if this interval extends past the end of our region
+            let adjusted_stop = if rec_stop >= stop {
+                dont_count_stop = true;
                 counter.len() - 1
             } else {
                 (rec_stop - start) as usize
@@ -368,11 +385,14 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 intervals.push(Interval {
                     start: adjusted_start,
                     stop: adjusted_stop,
-                    val: (),
+                    val: dont_count_stop,
                 });
             } else {
                 counter[adjusted_start] += 1;
-                counter[adjusted_stop] -= 1;
+                // Check if end of interval extended past region end
+                if !dont_count_stop {
+                    counter[adjusted_stop] -= 1;
+                }
             }
         }
 
@@ -383,7 +403,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 lapper.merge_overlaps();
                 for iv in lapper.intervals {
                     counter[iv.start] += 1;
-                    counter[iv.stop] -= 1;
+                    // Check if end of interval extended past region end
+                    if !iv.val {
+                        counter[iv.stop] -= 1;
+                    }
                 }
             }
         }
@@ -522,6 +545,9 @@ mod tests {
             Record::from_sam(&view, b"THREE\t147\tchr1\t60\t40\t25M\tchr1\t10\t75\tCCCCCCCCCCCCCCCCCCCCCCCCC\t#########################").unwrap(),
             Record::from_sam(&view, b"FOUR\t147\tchr1\t65\t40\t25M\tchr1\t15\t75\tNNNNNNNNNNNNNNNNNNNNNNNNN\t#########################").unwrap(),
             Record::from_sam(&view, b"FIVE\t147\tchr1\t70\t40\t25M\tchr1\t20\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            // Base on last position of chunk should verify that we aren't counting the last position by not throwing an index error
+            Record::from_sam(&view, b"FIVE\t147\tchr1\t999976\t40\t25M\tchr1\t1000026\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
+            Record::from_sam(&view, b"FIVE\t147\tchr1\t1000026\t40\t25M\tchr1\t999976\t75\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################").unwrap(),
 
             // Chr2 - Complex
             // Ins
@@ -593,11 +619,24 @@ mod tests {
     ) {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let simple_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, mate_fix, fast_mode, false, 0, read_filter);
+        let simple_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            mate_fix,
+            fast_mode,
+            false,
+            0,
+            read_filter,
+        );
 
-        let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            Some(cpus),
+            Some(1_000_000),
+            simple_processor,
+        );
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -620,8 +659,14 @@ mod tests {
         let simple_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, false, 0, read_filter);
 
-        let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            Some(cpus),
+            Some(1_000_000),
+            simple_processor,
+        );
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -644,8 +689,14 @@ mod tests {
         let simple_processor =
             OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, false, 0, read_filter);
 
-        let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, simple_processor);
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            Some(cpus),
+            Some(1_000_000),
+            simple_processor,
+        );
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -965,5 +1016,61 @@ mod tests {
         assert_eq!(positions.get("chr2").unwrap()[10].pos, 49);
         assert_eq!(positions.get("chr2").unwrap()[10].end, 54);
         assert_eq!(positions.get("chr2").unwrap()[10].depth, 2);
+    }
+
+    // Test that reads that overlap chunks are counted correctly.
+    #[rstest(
+        positions,
+        awareness_modifier,
+        case::vanilla(vanilla_positions(bamfile(), read_filter()), 0),
+        case::fast_mode(fast_mode_positions(bamfile(), read_filter()), 2),
+        case::vanilla_mate_fix(vanilla_positions_mate_fix(bamfile(), read_filter()), 0),
+        case::fast_mode_mate_fix(fast_mode_positions_mate_fix(bamfile(), read_filter()), 2)
+    )]
+    fn check_chunk_ends(
+        positions: HashMap<String, Vec<RangePositions>>,
+        awareness_modifier: usize,
+    ) {
+        if awareness_modifier == 0 {
+            // Aware of refskips
+            assert_eq!(positions.get("chr3").unwrap()[19].pos, 94);
+            assert_eq!(positions.get("chr3").unwrap()[19].end, 1_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[19].depth, 0);
+            assert_eq!(positions.get("chr3").unwrap()[20].pos, 1_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[20].end, 2_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[20].depth, 0);
+            assert_eq!(positions.get("chr3").unwrap()[21].pos, 2_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[21].end, 2_000_002);
+            assert_eq!(positions.get("chr3").unwrap()[21].depth, 0);
+            assert_eq!(positions.get("chr3").unwrap()[22].pos, 2_000_002);
+            assert_eq!(positions.get("chr3").unwrap()[22].end, 2_000_025);
+            assert_eq!(positions.get("chr3").unwrap()[22].depth, 1);
+            assert_eq!(positions.get("chr3").unwrap()[23].pos, 2_000_025);
+            assert_eq!(positions.get("chr3").unwrap()[23].end, 2_000_032);
+            assert_eq!(positions.get("chr3").unwrap()[23].depth, 0);
+            assert_eq!(positions.get("chr3").unwrap()[24].pos, 2_000_032);
+            assert_eq!(positions.get("chr3").unwrap()[24].end, 2_000_034);
+            assert_eq!(positions.get("chr3").unwrap()[24].depth, 1);
+            assert_eq!(positions.get("chr3").unwrap()[25].pos, 2_000_034);
+            assert_eq!(positions.get("chr3").unwrap()[25].end, 3_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[25].depth, 0);
+        } else {
+            // only counting read start / ends
+            assert_eq!(positions.get("chr3").unwrap()[17].pos, 94);
+            assert_eq!(positions.get("chr3").unwrap()[17].end, 1_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[17].depth, 2);
+            assert_eq!(positions.get("chr3").unwrap()[18].pos, 1_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[18].end, 2_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[18].depth, 2);
+            assert_eq!(positions.get("chr3").unwrap()[19].pos, 2_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[19].end, 2_000_025);
+            assert_eq!(positions.get("chr3").unwrap()[19].depth, 2);
+            assert_eq!(positions.get("chr3").unwrap()[20].pos, 2_000_025);
+            assert_eq!(positions.get("chr3").unwrap()[20].end, 2_000_034);
+            assert_eq!(positions.get("chr3").unwrap()[20].depth, 1);
+            assert_eq!(positions.get("chr3").unwrap()[21].pos, 2_000_034);
+            assert_eq!(positions.get("chr3").unwrap()[21].end, 3_000_000);
+            assert_eq!(positions.get("chr3").unwrap()[21].depth, 0);
+        }
     }
 }

@@ -15,9 +15,7 @@ If a metric is missing, or performance is lacking. Please file a bug/feature tic
 
 ## Why?
 
-Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute that you have available. Additionally, `perbase` aims to be more accurate than other tools. EX: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does.
-
-Lastly, to the best of my knowledge, `perbase` offers the fastest mate-fix aware version of all algorithms. This is again due more to its highly concurrent nature than to any algorithmic improvement to mate detection.
+Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute that you have available. Additionally, `perbase` aims to be more accurate than other tools. EX: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does, `perbase` allows for mate-fixing in `--fast-mode` while `mosdepth` does not.
 
 ## Installation
 
@@ -95,8 +93,6 @@ tabix output.tsv.gz chr1:5-10
 Usage:
 
 ```text
-perbase-simple-depth
-Seth Stadick <sstadick@gmail.com>
 Calculate the depth at each base, per-nucleotide
 
 USAGE:
@@ -124,18 +120,19 @@ ARGS:
     <reads>    Input indexed BAM/CRAM to analyze
 ```
 
-
 ### only-depth
 
-The `only-depth` tool walks over the input BAM/CRAM file and caluclates the depth over all postions specified by either a BED file or in the BAM/CRAM header. Adjacent positions that have the same depth will be merged together to form a non-inclusive range (see example output).
+The `only-depth` tool walks over the input BAM/CRAM file and calculates the depth over all positions specified by either a BED file or in the BAM/CRAM header. Adjacent positions that have the same depth will be merged together to form a non-inclusive range (see example output).
 
 There are two distinct modes that `only-depth` can run in, gated by the `--fast-mode` flag. When running in fast-mode, only depth over the area a read covers is only determined by the reads start and end postions, and no cigar related info is taken into account. `--mate-fix` may still be used in this mode, and areas where mates overlap will not be counted twice.
 
 Without the `--fast-mode` flag, the depth at each position is determined in a manner similar to `simple-depth` where `DEL` will count toward depth, but `REF_SKIP` will not. Additionally, any reads that fail the `--exclude-flags` will not be counted toward depth. Lastly, `--mate-fix` can be applied to avoid counting regions twice where mates may overlap.
 
+Regarding mate fixes, `perbase` will will "fixes" based only on the counted regions in a read. For example, if you have a read that goes from "chr1:10-1000" with a CIGAR of "25M974N1M", and the mate alignes nicely at "chr1:45-70" with CIGAR "25M", the mate will count toward the depth over "chr1:45-74". This is in contrast to other tools that will reject the mate even though it overlaps a region of R1 that is not counted toward depth.
+
 For the fastest possible output, use `only-depth --fast-mode`. `--mate-fix` is more computational.
 
-**Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundry. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem.
+**Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundary. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem. Additionally, you can pipe into `merge-adjcent` which will fix it as well. EX: `perbase only-depth -m file.bam | perbase merge-adjacent > out.tsv`.
 
 Example output of `perbase only-depth --mate-fix --zero-base  ./test/test.bam`:
 
@@ -162,8 +159,6 @@ chr2    84      89      1
 Usage:
 
 ```text
-perbase-only-depth
-Seth Stadick <sstadick@gmail.com>
 Calculate the only the depth at each base
 
 USAGE:
@@ -173,6 +168,7 @@ FLAGS:
     -x, --fast-mode    Calculate depth based only on read starts/stops, see docs for full details
     -h, --help         Prints help information
     -m, --mate-fix     Fix overlapping mates counts, see docs for full details
+    -n, --no-merge     Skip merging adjacent bases that have the same depth
     -V, --version      Prints version information
     -z, --zero-base    Output positions as 0-based instead of 1-based
 
@@ -191,3 +187,64 @@ OPTIONS:
 ARGS:
     <reads>    Input indexed BAM/CRAM to analyze
 ```
+
+## merge-adjacent
+
+`merge-adjacent` is a utility to merege overlapping regions in a BED-like file.
+
+It will take a file with four columns and no header as long as the colums are like:
+
+```text
+<contig>\t<start>\t<stop>\t<depth>\n
+```
+
+Or it can take files with three columsn with headers that are like
+
+```text
+<REF|chrom>\t<POS|chromStart>\t<END|chromEnd>\t<DEPTH|COV>
+```
+
+The `END|chromEnd` column is optional.
+
+```text
+Merge adjacent intervals that have the same depth. Input must be sorted like: `sort -k1,1 -k2,2n in.bed > in.sorted.bed`
+
+Generally accepts any file with no header tha is <chrom>\t<start>\t<stop>\t<depth>. The <stop> is optional. See
+documentation for explaination of headers that are accepted.
+
+USAGE:
+    perbase merge-adjacent [FLAGS] [OPTIONS] [in-file]
+
+FLAGS:
+    -h, --help
+            Prints help information
+
+    -n, --no-header
+            Indicate if the input file does not have a header
+
+    -V, --version
+            Prints version information
+
+
+OPTIONS:
+    -o, --output <output>
+            The output location, defaults to STDOUT
+
+
+ARGS:
+    <in-file>
+            Input bed-like file, defaults to STDIN
+```
+
+EX:
+
+```bash
+perbase only-depth indexed.bam | perbase merge-adjacent > out.tsv
+```
+
+## Comparable projects
+
+- [`sambamba depth`](https://github.com/biod/sambamba/wiki/%5Bsambamba-depth%5D-documentation)
+- [`samtools depth`](http://www.htslib.org/doc/samtools-depth.html)
+- [`mosdepth`](https://github.com/brentp/mosdepth)
+- [`bam-readcount`](https://github.com/genome/bam-readcount)
