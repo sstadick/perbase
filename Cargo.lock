@@ -620,6 +620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru_time_cache"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebac060fafad3adedd0c66a80741a92ff4bc8e94a273df2ba3770ab206f2e29a"
+
+[[package]]
 name = "lzma-sys"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,6 +788,7 @@ dependencies = [
  "itertools",
  "lazy_static",
  "log",
+ "lru_time_cache",
  "num_cpus",
  "proptest",
  "rayon",

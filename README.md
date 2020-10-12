@@ -41,6 +41,7 @@ The output columns are as follows:
 | -------- | -------------------------------------------------------------------------------------------------- |
 | REF      | The reference sequence name                                                                        |
 | POS      | The position on the reference sequence                                                             |
+| REF_BASE | The reference base at the position, column excluded if no reference was supplied                   |
 | DEPTH    | The total depth at the position SUM(A, C, T, G, DEL)                                               |
 | A        | Total A nucleotides seen at this position                                                          |
 | C        | Total C nucleotides seen at this position                                                          |
@@ -59,27 +60,22 @@ perbase base-depth ./test/test.bam
 Example output
 
 ```text
-REF     POS     DEPTH   A       C       G       T       N       INS     DEL     FAIL    REF_SKIP
-chr2    1       1       1       0       0       0       0       0       0       0       0
-chr2    2       1       1       0       0       0       0       1       0       0       0
-chr2    3       1       0       0       1       0       0       0       0       0       0
-chr2    4       1       1       0       0       0       0       0       0       0       0
-chr2    5       2       2       0       0       0       0       0       0       0       0
-chr2    6       2       2       0       0       0       0       0       0       0       0
-chr2    7       2       1       0       0       0       0       0       1       0       0
-chr2    8       2       1       0       0       0       0       0       1       0       0
-chr2    9       2       1       0       0       0       0       0       1       0       0
-chr2    10      3       2       0       0       0       0       0       1       0       0
-chr2    11      3       2       0       0       0       0       0       1       0       0
-chr2    12      3       3       0       0       0       0       0       0       0       0
-chr2    13      3       2       0       0       0       0       0       0       0       1
-chr2    14      3       2       0       0       0       0       0       0       0       1
-chr2    15      4       3       0       0       0       0       0       0       0       1
-chr2    16      4       2       0       0       1       0       0       0       0       1
-chr2    17      4       3       0       0       0       0       0       0       0       1
+REF     POS     REF_BASE        DEPTH   A       C       G       T       N       INS     DEL     REF_SKIP        FAIL
+chr1    709636  T       16      0       0       0       16      0       0       0       0       0
+chr1    709637  T       16      0       4       0       12      0       0       0       0       0
+chr1    709638  A       16      16      0       0       0       0       0       0       0       0
+chr1    709639  G       16      0       0       16      0       0       0       0       0       0
+chr1    709640  A       16      16      0       0       0       0       0       0       0       0
+chr1    709641  A       16      16      0       0       0       0       0       0       0       0
+chr1    709642  G       16      0       0       16      0       0       0       0       0       0
+chr1    709643  G       16      0       0       16      0       0       0       0       0       0
+chr1    709644  T       16      0       0       0       16      0       0       0       0       0
+chr1    709645  G       16      0       0       16      0       0       0       0       0       0
 ```
 
 If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
+
+If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed an match the BAM/CRAM header of the input.
 
 The output can be compressed and indexed as follows:
 
@@ -93,6 +89,8 @@ tabix output.tsv.gz chr1:5-10
 Usage:
 
 ```text
+perbase-base-depth 0.3.9-alpha.0
+Seth Stadick <sstadick@gmail.com>
 Calculate the depth at each base, per-nucleotide
 
 USAGE:
@@ -105,16 +103,18 @@ FLAGS:
     -z, --zero-base    Output positions as 0-based instead of 1-based
 
 OPTIONS:
-    -b, --bed-file <bed-file>              A BED file containing regions of interest. If specified, only bases from the
-                                           given regions will be reported on
-    -c, --chunksize <chunksize>            The ideal number of basepairs each worker receives. Total bp in memory at one
-                                           time is (threads - 2) * chunksize
-    -F, --exclude-flags <exclude-flags>    SAM flags to exclude, recommended 3848 [default: 0]
-    -f, --include-flags <include-flags>    SAM flags to include [default: 0]
-    -q, --min-mapq <min-mapq>              Minimum MAPQ for a read to count toward depth [default: 0]
-    -o, --output <output>                  Output path, defaults to stdout
-    -r, --ref-fasta <ref-fasta>            Indexed reference fasta, set if using CRAM
-    -t, --threads <threads>                The number of threads to use [default: 16]
+    -b, --bed-file <bed-file>                A BED file containing regions of interest. If specified, only bases from
+                                             the given regions will be reported on
+    -c, --chunksize <chunksize>              The ideal number of basepairs each worker receives. Total bp in memory at
+                                             one time is (threads - 2) * chunksize
+    -F, --exclude-flags <exclude-flags>      SAM flags to exclude, recommended 3848 [default: 0]
+    -f, --include-flags <include-flags>      SAM flags to include [default: 0]
+    -q, --min-mapq <min-mapq>                Minimum MAPQ for a read to count toward depth [default: 0]
+    -o, --output <output>                    Output path, defaults to stdout
+        --ref-cache-size <ref-cache-size>    Number of Reference Sequences to hold in memory at one time. Smaller will
+                                             decrease mem usage [default: 10]
+    -r, --ref-fasta <ref-fasta>              Indexed reference fasta, set if using CRAM
+    -t, --threads <threads>                  The number of threads to use [default: 16]
 
 ARGS:
     <reads>    Input indexed BAM/CRAM to analyze

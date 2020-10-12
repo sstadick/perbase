@@ -20,6 +20,9 @@ pub struct PileupPosition {
     pub ref_seq: String,
     /// 1-based position in the sequence.
     pub pos: usize,
+    /// The reference base at this position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_base: Option<char>,
     /// Total depth at this position.
     pub depth: usize,
     /// Number of A bases at this position.
@@ -43,7 +46,7 @@ pub struct PileupPosition {
     pub fail: usize,
 }
 
-impl Position  for PileupPosition {
+impl Position for PileupPosition {
     /// Create a new position for the given ref_seq name.
     fn new(ref_seq: String, pos: usize) -> Self {
         PileupPosition {
@@ -53,7 +56,6 @@ impl Position  for PileupPosition {
         }
     }
 }
-
 
 impl PileupPosition {
     /// Given a record, update the counts at this position

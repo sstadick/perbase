@@ -4,6 +4,7 @@
 //! as well as depth per nucleotide. Additionally counts the number of
 //! insertions / deletions at each position.
 use anyhow::Result;
+use bio::io::fasta::IndexedReader;
 use csv;
 use grep_cli::stdout;
 use log::*;
@@ -11,7 +12,7 @@ use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
     read_filter::{DefaultReadFilter, ReadFilter},
-    utils,
+    reference, utils,
 };
 use rust_htslib::{bam, bam::Read};
 use std::{
@@ -68,6 +69,10 @@ pub struct BaseDepth {
     /// Output positions as 0-based instead of 1-based.
     #[structopt(long, short = "z")]
     zero_base: bool,
+
+    /// Number of Reference Sequences to hold in memory at one time. Smaller will decrease mem usage.
+    #[structopt(long, default_value = "10")]
+    ref_cache_size: usize,
 }
 
 impl BaseDepth {
@@ -85,6 +90,7 @@ impl BaseDepth {
             self.mate_fix,
             if self.zero_base { 0 } else { 1 },
             read_filter,
+            self.ref_cache_size,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -125,6 +131,8 @@ struct BaseProcessor<F: ReadFilter> {
     reads: PathBuf,
     /// path to indexed ref file
     ref_fasta: Option<PathBuf>,
+    /// Cached access to the ref_fasta
+    ref_buffer: Option<reference::Buffer>,
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
     /// 0-based or 1-based coordiante output
@@ -141,10 +149,20 @@ impl<F: ReadFilter> BaseProcessor<F> {
         mate_fix: bool,
         coord_base: usize,
         read_filter: F,
+        ref_buffer_capacity: usize,
     ) -> Self {
+        let ref_buffer = if let Some(ref_fasta) = &ref_fasta {
+            Some(reference::Buffer::new(
+                IndexedReader::from_file(ref_fasta).expect("Reading Indexed FASTA"),
+                ref_buffer_capacity,
+            ))
+        } else {
+            None
+        };
         Self {
             reads,
             ref_fasta,
+            ref_buffer,
             mate_fix,
             coord_base,
             read_filter,
@@ -186,6 +204,16 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                     } else {
                         PileupPosition::from_pileup(pileup, &header, &self.read_filter)
                     };
+                    // Add the ref base if reference is available
+                    if let Some(buffer) = &self.ref_buffer {
+                        let seq = buffer
+                            .seq(&pos.ref_seq)
+                            .expect("Fetched reference sequence");
+                        pos.ref_base = Some(char::from(
+                            *seq.get(pos.pos)
+                                .expect("Input SAM does not match reference"),
+                        ));
+                    }
                     pos.pos += self.coord_base;
                     Some(pos)
                 } else {
@@ -287,7 +315,9 @@ mod tests {
     ) -> HashMap<String, Vec<PileupPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let base_processor = BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter);
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
+        let base_processor =
+            BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter, cpus);
 
         let par_granges_runner =
             par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, base_processor);
@@ -310,12 +340,14 @@ mod tests {
     ) -> HashMap<String, Vec<PileupPosition>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
         let base_processor = BaseProcessor::new(
             bamfile.0.clone(),
             None,
             true, // mate aware
             1,
             read_filter,
+            cpus,
         );
 
         let par_granges_runner =
