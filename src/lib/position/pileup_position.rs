@@ -21,6 +21,7 @@ pub struct PileupPosition {
     /// 1-based position in the sequence.
     pub pos: usize,
     /// The reference base at this position.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_base: Option<char>,
     /// Total depth at this position.
     pub depth: usize,
