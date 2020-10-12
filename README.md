@@ -128,9 +128,9 @@ There are two distinct modes that `only-depth` can run in, gated by the `--fast-
 
 Without the `--fast-mode` flag, the depth at each position is determined in a manner similar to `base-depth` where `DEL` will count toward depth, but `REF_SKIP` will not. Additionally, any reads that fail the `--exclude-flags` will not be counted toward depth. Lastly, `--mate-fix` can be applied to avoid counting regions twice where mates may overlap.
 
-Regarding mate fixes, `perbase` will will "fixes" based only on the counted regions in a read. For example, if you have a read that goes from "chr1:10-1000" with a CIGAR of "25M974N1M", and the mate alignes nicely at "chr1:45-70" with CIGAR "25M", the mate will count toward the depth over "chr1:45-74". This is in contrast to other tools that will reject the mate even though it overlaps a region of R1 that is not counted toward depth.
+Regarding mate fixes, `perbase` will make "fixes" based only on the counted regions in a read. For example, if you have a read that goes from "chr1:0-1000" with a CIGAR of "25M974N1M", and the mate aligns nicely at "chr1:45-70" with CIGAR "25M", the mate will count toward the depth over "chr1:45-74". This is in contrast to other tools that will reject the mate even though it overlaps a region of R1 that is not counted toward depth.
 
-For the fastest possible output, use `only-depth --fast-mode`. `--mate-fix` is more computational.
+For the fastest possible output, use `only-depth --fast-mode`.
 
 **Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundary. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem. Additionally, you can pipe into `merge-adjcent` which will fix it as well. EX: `perbase only-depth -m file.bam | perbase merge-adjacent > out.tsv`.
 
@@ -190,15 +190,15 @@ ARGS:
 
 ## merge-adjacent
 
-`merge-adjacent` is a utility to merege overlapping regions in a BED-like file.
+`merge-adjacent` is a utility to merge overlapping regions in a BED-like file.
 
-It will take a file with four columns and no header as long as the colums are like:
+It will take a file with four columns and no header as long as the columns are like:
 
 ```text
 <contig>\t<start>\t<stop>\t<depth>\n
 ```
 
-Or it can take files with three columsn with headers that are like
+Or it can take files with three columns with headers that are like
 
 ```text
 <REF|chrom>\t<POS|chromStart>\t<END|chromEnd>\t<DEPTH|COV>
@@ -242,7 +242,7 @@ EX:
 perbase only-depth indexed.bam | perbase merge-adjacent > out.tsv
 ```
 
-## Comparable projects
+## Similar Projects
 
 - [`sambamba depth`](https://github.com/biod/sambamba/wiki/%5Bsambamba-depth%5D-documentation)
 - [`samtools depth`](http://www.htslib.org/doc/samtools-depth.html)
