@@ -16,6 +16,7 @@ use perbase_lib::{
 };
 use rust_htslib::{bam, bam::Read};
 use std::{
+    convert::TryInto,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -193,8 +194,9 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         // fetch the region of interest
         reader.fetch(tid, start, stop).expect("Fetched a region");
         // Walk over pileups
-        let result: Vec<PileupPosition> = reader
-            .pileup()
+        let mut pileup = reader.pileup();
+        pileup.set_max_depth(i32::max_value().try_into().unwrap());
+        let result: Vec<PileupPosition> = pileup
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
