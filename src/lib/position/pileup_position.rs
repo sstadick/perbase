@@ -44,6 +44,8 @@ pub struct PileupPosition {
     pub ref_skip: usize,
     /// Number of reads failing filters at this position.
     pub fail: usize,
+    /// Depth is within 1% of max_depth
+    pub near_max_depth: bool
 }
 
 impl Position for PileupPosition {

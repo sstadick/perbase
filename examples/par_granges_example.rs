@@ -84,11 +84,12 @@ fn main() -> Result<()> {
 
     // Create a par_granges runner
     let par_granges_runner = par_granges::ParGranges::new(
-        PathBuf::from("test/test.bam"),       // pass in bam
-        None,                                 // optional ref fasta
+        PathBuf::from("test/test.bam"),             // pass in bam
+        None,                                   // optional ref fasta
+        None,                                 // optional bcf/vcf file to specify positions of interest
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
-        None,                                 // optional allowed number of threads, defaults to max
-        None,                                 // optional chunksize modification
+        None,                                    // optional allowed number of threads, defaults to max
+        None,                                  // optional chunksize modification
         basic_processor,
     );
 

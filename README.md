@@ -8,14 +8,13 @@
 [![Crates.io](https://img.shields.io/crates/v/perbase.svg)](https://crates.io/crates/perbase)
 [![Conda](https://anaconda.org/anaconda/anaconda/badges/installer/conda.svg)](https://anaconda.org/bioconda/perbase)
 
-
 A highly parallelized utility for analyzing metrics at a per-base level.
 
 If a metric is missing, or performance is lacking. Please file a bug/feature ticket in issues.
 
 ## Why?
 
-Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute that you have available. Additionally, `perbase` aims to be more accurate than other tools. EX: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does not.
+Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute that you have available. Additionally, `perbase` aims to be more accurate than other tools. E.g.: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does.
 
 ## Installation
 
@@ -37,21 +36,22 @@ The `base-depth` tool walks over every position in the BAM/CRAM file and calcula
 
 The output columns are as follows:
 
-| Column   | Description                                                                                        |
-| -------- | -------------------------------------------------------------------------------------------------- |
-| REF      | The reference sequence name                                                                        |
-| POS      | The position on the reference sequence                                                             |
-| REF_BASE | The reference base at the position, column excluded if no reference was supplied                   |
-| DEPTH    | The total depth at the position SUM(A, C, T, G, DEL)                                               |
-| A        | Total A nucleotides seen at this position                                                          |
-| C        | Total C nucleotides seen at this position                                                          |
-| G        | Total G nucleotides seen at this position                                                          |
-| T        | Total T nucleotides seen at this position                                                          |
-| N        | Total N nucleotides seen at this position                                                          |
-| INS      | Total insertions that start at the base to the right of this position                              |
-| DEL      | Total deletions covering this position                                                             |
-| REF_SKIP | Total reference skip operations covering this position                                             |
-| FAIL     | Total reads failing filters that covered this position (their bases were not counted toward depth) |
+| Column         | Description                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| REF            | The reference sequence name                                                                        |
+| POS            | The position on the reference sequence                                                             |
+| REF_BASE       | The reference base at the position, column excluded if no reference was supplied                   |
+| DEPTH          | The total depth at the position SUM(A, C, T, G, DEL)                                               |
+| A              | Total A nucleotides seen at this position                                                          |
+| C              | Total C nucleotides seen at this position                                                          |
+| G              | Total G nucleotides seen at this position                                                          |
+| T              | Total T nucleotides seen at this position                                                          |
+| N              | Total N nucleotides seen at this position                                                          |
+| INS            | Total insertions that start at the base to the right of this position                              |
+| DEL            | Total deletions covering this position                                                             |
+| REF_SKIP       | Total reference skip operations covering this position                                             |
+| FAIL           | Total reads failing filters that covered this position (their bases were not counted toward depth) |
+| NEAR_MAX_DEPTH | Flag to indicate if this position came within 1% of the max depth specified                        |
 
 ```bash
 perbase base-depth ./test/test.bam
@@ -60,17 +60,17 @@ perbase base-depth ./test/test.bam
 Example output
 
 ```text
-REF     POS     REF_BASE        DEPTH   A       C       G       T       N       INS     DEL     REF_SKIP        FAIL
-chr1    709636  T       16      0       0       0       16      0       0       0       0       0
-chr1    709637  T       16      0       4       0       12      0       0       0       0       0
-chr1    709638  A       16      16      0       0       0       0       0       0       0       0
-chr1    709639  G       16      0       0       16      0       0       0       0       0       0
-chr1    709640  A       16      16      0       0       0       0       0       0       0       0
-chr1    709641  A       16      16      0       0       0       0       0       0       0       0
-chr1    709642  G       16      0       0       16      0       0       0       0       0       0
-chr1    709643  G       16      0       0       16      0       0       0       0       0       0
-chr1    709644  T       16      0       0       0       16      0       0       0       0       0
-chr1    709645  G       16      0       0       16      0       0       0       0       0       0
+REF     POS     REF_BASE        DEPTH   A       C       G       T       N       INS     DEL     REF_SKIP        FAIL    NEAR_MAX_DEPTH
+chr1    709636  T       16      0       0       0       16      0       0       0       0       0   false
+chr1    709637  T       16      0       4       0       12      0       0       0       0       0   false
+chr1    709638  A       16      16      0       0       0       0       0       0       0       0   false
+chr1    709639  G       16      0       0       16      0       0       0       0       0       0   false
+chr1    709640  A       16      16      0       0       0       0       0       0       0       0   false
+chr1    709641  A       16      16      0       0       0       0       0       0       0       0   false
+chr1    709642  G       16      0       0       16      0       0       0       0       0       0   false
+chr1    709643  G       16      0       0       16      0       0       0       0       0       0   false
+chr1    709644  T       16      0       0       0       16      0       0       0       0       0   false
+chr1    709645  G       16      0       0       16      0       0       0       0       0       0   false
 ```
 
 If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
@@ -89,8 +89,6 @@ tabix output.tsv.gz chr1:5-10
 Usage:
 
 ```text
-perbase-base-depth 0.3.9-alpha.0
-Seth Stadick <sstadick@gmail.com>
 Calculate the depth at each base, per-nucleotide
 
 USAGE:
@@ -103,12 +101,17 @@ FLAGS:
     -z, --zero-base    Output positions as 0-based instead of 1-based
 
 OPTIONS:
+    -B, --bcf-file <bcf-file>                A BCF/VCF file containing positions of interest. If specified, only bases
+                                             from the given positions will be reported on
     -b, --bed-file <bed-file>                A BED file containing regions of interest. If specified, only bases from
                                              the given regions will be reported on
     -c, --chunksize <chunksize>              The ideal number of basepairs each worker receives. Total bp in memory at
                                              one time is (threads - 2) * chunksize
     -F, --exclude-flags <exclude-flags>      SAM flags to exclude, recommended 3848 [default: 0]
     -f, --include-flags <include-flags>      SAM flags to include [default: 0]
+    -D, --max-depth <max-depth>              Set the max depth for a pileup. If a positions depth is within 1% of max-
+                                             depth the `NEAR_MAX_DEPTH` output field will be set to true and that
+                                             position should be viewed as suspect [default: 100000]
     -q, --min-mapq <min-mapq>                Minimum MAPQ for a read to count toward depth [default: 0]
     -o, --output <output>                    Output path, defaults to stdout
         --ref-cache-size <ref-cache-size>    Number of Reference Sequences to hold in memory at one time. Smaller will
@@ -118,6 +121,7 @@ OPTIONS:
 
 ARGS:
     <reads>    Input indexed BAM/CRAM to analyze
+
 ```
 
 ### only-depth
@@ -173,6 +177,10 @@ FLAGS:
     -z, --zero-base    Output positions as 0-based instead of 1-based
 
 OPTIONS:
+    -B, --bcf-file <bcf-file>              A BCF/VCF file containing positions of interest. If specified, only bases
+                                           from the given positions will be reported on. Note that it may be more
+                                           efficient to calculate depth over regions if your positions are clustered
+                                           tightly together
     -b, --bed-file <bed-file>              A BED file containing regions of interest. If specified, only bases from the
                                            given regions will be reported on
     -c, --chunksize <chunksize>            The ideal number of basepairs each worker receives. Total bp in memory at one
@@ -186,6 +194,7 @@ OPTIONS:
 
 ARGS:
     <reads>    Input indexed BAM/CRAM to analyze
+e
 ```
 
 ## merge-adjacent
