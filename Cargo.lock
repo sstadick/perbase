@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "perbase"
-version = "0.5.1-alpha.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "bio",
