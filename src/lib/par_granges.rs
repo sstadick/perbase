@@ -309,7 +309,7 @@ mod test {
         fn arb_iv_start(max_iv: u64)(start in 0..max_iv/2) -> u64 { start }
     }
     prop_compose! {
-        fn arb_iv_size(max_iv: u64)(size in 0..max_iv/2) -> u64 { size }
+        fn arb_iv_size(max_iv: u64)(size in 1..max_iv/2) -> u64 { size }
     }
     prop_compose! {
         // Create an arbitrary interval where the min size == max_iv / 2
