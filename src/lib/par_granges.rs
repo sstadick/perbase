@@ -7,10 +7,13 @@ use crossbeam::channel::{unbounded, Receiver};
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
-use rust_htslib::bam::{HeaderView, IndexedReader, Read};
+use rust_htslib::{
+    bam::{HeaderView, IndexedReader, Read},
+    bcf::{Reader, Read as bcfRead}
+};
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
-use std::{path::PathBuf, thread};
+use std::{path::PathBuf, thread, convert::TryInto};
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -38,6 +41,8 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     ref_fasta: Option<PathBuf>,
     /// Optional path to a BED file to restrict the regions iterated over
     regions_bed: Option<PathBuf>,
+    /// Optional path to a BCF/VCF file to restrict the regions iterated over
+    regions_bcf: Option<PathBuf>,
     /// Number of threads this is allowed to use, uses all if None
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
@@ -56,6 +61,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `reads`- path to an indexed BAM/CRAM
     /// * `ref_fasta`- path to an indexed reference file for CRAM
     /// * `regions_bed`- Optional BED file path restricting the regions to be examined
+    /// * `regions_bcf`- Optional BCF/VCF file path restricting the regions to be examined
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
@@ -64,6 +70,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         regions_bed: Option<PathBuf>,
+        regions_bcf: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
         processor: R,
@@ -92,6 +99,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             reads,
             ref_fasta,
             regions_bed,
+            regions_bcf,
             threads,
             chunksize,
             pool,
@@ -127,8 +135,22 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 // Get a copy of the header
                 let header = reader.header().to_owned();
 
-                let intervals = if let Some(regions_bed) = &self.regions_bed {
-                    Self::bed_to_intervals(&header, regions_bed).expect("Parsed BED to intervals")
+                // Work out if we are restricted to a subset of sites
+                let bed_intervals = if let Some(regions_bed) = &self.regions_bed {
+                    Some(Self::bed_to_intervals(&header, regions_bed).expect("Parsed BED to intervals"))
+                } else { None };
+                let bcf_intervals = if let Some(regions_bcf) = &self.regions_bcf {
+                    Some(Self::bcf_to_intervals(&header, regions_bcf).expect("Parsed BCF/VCF to intervals"))
+                } else { None };
+                let restricted_ivs = match (bed_intervals, bcf_intervals) {
+                    (Some(bed_ivs), Some(bcf_ivs)) => Some(Self::merge_intervals(bed_ivs, bcf_ivs)),
+                    (Some(bed_ivs), None) => Some(bed_ivs),
+                    (None, Some(bcf_ivs)) => Some(bcf_ivs),
+                    (None, None) => None
+                };
+
+                let intervals = if let Some(restricted) = restricted_ivs {
+                    restricted
                 } else {
                     Self::header_to_intervals(&header, self.chunksize)
                         .expect("Parsed BAM/CRAM header to intervals")
@@ -145,9 +167,10 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                     // Result holds the processed positions to be sent to writer
                     let mut result = vec![];
                     for chunk_start in (0..tid_end).step_by(serial_step_size) {
+                        let tid_name = std::str::from_utf8(header.tid2name(tid)).unwrap();
                         let chunk_end =
                             std::cmp::min(chunk_start + serial_step_size as u64, tid_end);
-                        info!("Batch Processing {}:{}-{}", tid, chunk_start, chunk_end);
+                        info!("Batch Processing {}:{}-{}", tid_name, chunk_start, chunk_end);
                         let (r, _) = rayon::join(
                             || {
                                 // Must be a vec so that par_iter works and results stay in order
@@ -162,7 +185,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                                     .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
-                                        info!("Processing {}:{}-{}", tid, iv.start, iv.stop);
+                                        info!("Processing {}:{}-{}", tid_name, iv.start, iv.stop);
                                         self.processor.process_region(tid, iv.start, iv.stop)
                                     })
                                     .collect()
@@ -231,6 +254,43 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             })
             .collect())
     }
+
+    /// Read a BCF/VCF file into a vector of lappers with index representing the TID
+    fn bcf_to_intervals(header: &HeaderView, bcf_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
+        let mut bcf_reader = Reader::from_path(bcf_file).expect("Error openging BCF/VCF file.");
+        let bcf_header_reader = Reader::from_path(bcf_file).expect("Error openging BCF/VCF file.");
+        let bcf_header = bcf_header_reader.header();
+        let mut intervals = vec![vec![]; header.target_count() as usize];
+        // TODO: validate the headers against eachother
+        for record in bcf_reader.records() {
+            let record = record?;
+            let record_rid = bcf_header.rid2name(record.rid().unwrap()).unwrap();
+            let tid = header.tid(record_rid).expect("Chromosome not found in BAM/CRAM header");
+            let pos: u64 = record.pos().try_into().expect("Got a negative value for pos");
+            intervals[tid as usize].push(Interval {
+                start: pos, stop: pos + 1, val: ()
+            });
+        }
+
+        Ok(intervals.into_iter().map(|ivs| {
+            let mut lapper = Lapper::new(ivs);
+            lapper.merge_overlaps();
+            lapper
+        }).collect())
+    }
+
+    /// Merge two sets of restriction intervals together
+    fn merge_intervals(a_ivs: Vec<Lapper<u64, ()>>, b_ivs: Vec<Lapper<u64, ()>>) -> Vec<Lapper<u64, ()>> {
+        let mut intervals = vec![vec![]; a_ivs.len()];
+        for (i, (a_lapper, b_lapper)) in a_ivs.into_iter().zip(b_ivs.into_iter()).enumerate() {
+            intervals[i] = a_lapper.into_iter().chain(b_lapper.into_iter()).collect();
+        }
+        intervals.into_iter().map(|ivs| {
+            let mut lapper = Lapper::new(ivs);
+            lapper.merge_overlaps();
+            lapper
+        }).collect()
+    }
 }
 
 #[cfg(test)]
@@ -239,9 +299,9 @@ mod test {
     use bio::io::bed;
     use num_cpus;
     use proptest::prelude::*;
-    use rust_htslib::bam;
+    use rust_htslib::{bam, bcf};
     use rust_lapper::{Interval, Lapper};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use tempfile::tempdir;
     // The purpose of these tests is to demonstrate that positions are covered once under a variety of circumstances
 
@@ -289,10 +349,11 @@ mod test {
         #[test]
         // add random chunksize and random cpus
         // NB: using any larger numbers for this tends to blow up the test runtime
-        fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>()) {
+        fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>(), use_vcf in any::<bool>()) {
             let tempdir = tempdir().unwrap();
             let bam_path = tempdir.path().join("test.bam");
             let bed_path = tempdir.path().join("test.bed");
+            let vcf_path = tempdir.path().join("test.vcf");
 
             // Build a BAM
             let mut header = bam::header::Header::new();
@@ -319,12 +380,37 @@ mod test {
                 }
             }
             drop(writer); // force flush
+
+            // Build a VCF file
+            let mut vcf_truth = HashMap::new();
+            let mut header = bcf::header::Header::new();
+            for (i,chr) in chromosomes.iter().enumerate() {
+                header.push_record(format!("##contig=<ID={},length={}>", &i.to_string(), &chr.2.to_string()).as_bytes());
+            }
+            let mut writer = bcf::Writer::from_path(&vcf_path, &header, true, bcf::Format::VCF).expect("Failed to open test.vcf for writing");
+            let mut record = writer.empty_record();
+            for (i, chr) in chromosomes.iter().enumerate() {
+                record.set_rid(Some(i as u32));
+                let counter = vcf_truth.entry(i).or_insert(0);
+                let mut seen = HashSet::new();
+                for iv in chr.0.iter() {
+                    if !seen.contains(&iv.start) {
+                        *counter += 1;
+                        seen.insert(iv.start);
+                    }
+                    record.set_pos(iv.start as i64);
+                    writer.write(&record).expect("Failed to write to test.vcf")
+                }
+            }
+
+            drop(writer); // force flush
             // Create the processor with a dumb impl of processing that just returns positions with no counting
             let test_processor = TestProcessor {};
             let par_granges_runner = ParGranges::new(
                 bam_path,
                 None,
                 if use_bed { Some(bed_path) } else { None }, // do one with regions
+                if use_vcf { Some(vcf_path) } else { None }, // do one with vcf regions
                 Some(cpus),
                 Some(chunksize),
                 test_processor
@@ -338,9 +424,15 @@ mod test {
 
             // Validate that for each chr we get the expected number of bases
             for (chrom, positions) in chrom_counts.iter() {
-                if use_bed {
+                if use_bed  && !use_vcf {
                     // if this was with bed, should be equal to .1
                     prop_assert_eq!(chromosomes[*chrom].1, *positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].1, positions);
+                } else if use_bed && use_vcf {
+                    // if this was with bed, should be equal to .1, bed restrictions and vcf restrctions should overlap
+                    prop_assert_eq!(chromosomes[*chrom].1, *positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].1, positions);
+                } else if use_vcf && !use_bed {
+                    // total positions should be equal to the number of records for that chr in the vcf
+                    prop_assert_eq!(vcf_truth.get(chrom).unwrap(), positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].1, positions);
                 } else {
                     // if this was bam only, should be equal to rightmost postion
                     prop_assert_eq!(chromosomes[*chrom].2, *positions, "chr: {}, expected: {}, found: {}", chrom, chromosomes[*chrom].2, positions);

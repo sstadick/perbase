@@ -39,6 +39,10 @@ pub struct BaseDepth {
     #[structopt(long, short = "b")]
     bed_file: Option<PathBuf>,
 
+    /// A BCF/VCF file containing positions of interest. If specified, only bases from the given positions will be reported on.
+    #[structopt(long, short = "B")]
+    bcf_file: Option<PathBuf>,
+
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
@@ -74,6 +78,11 @@ pub struct BaseDepth {
     /// Number of Reference Sequences to hold in memory at one time. Smaller will decrease mem usage.
     #[structopt(long, default_value = "10")]
     ref_cache_size: usize,
+
+    /// Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH`
+    /// output field will be set to true and that position should be viewed as suspect.
+    #[structopt(long, short = "D", default_value = "100000")]
+    max_depth: u32
 }
 
 impl BaseDepth {
@@ -91,6 +100,7 @@ impl BaseDepth {
             self.mate_fix,
             if self.zero_base { 0 } else { 1 },
             read_filter,
+            self.max_depth,
             self.ref_cache_size,
         );
 
@@ -98,6 +108,7 @@ impl BaseDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.bed_file.clone(),
+            self.bcf_file.clone(),
             Some(cpus),
             self.chunksize.clone(),
             base_processor,
@@ -140,6 +151,10 @@ struct BaseProcessor<F: ReadFilter> {
     coord_base: usize,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
+    /// max depth to pass to htslib pileup engine, max value is MAX(i32)
+    max_depth: u32,
+    /// the cutoff at which we start logging warnings about depth being close to max depth
+    max_depth_warnings_cutoff: u32
 }
 
 impl<F: ReadFilter> BaseProcessor<F> {
@@ -150,6 +165,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
         mate_fix: bool,
         coord_base: usize,
         read_filter: F,
+        max_depth: u32,
         ref_buffer_capacity: usize,
     ) -> Self {
         let ref_buffer = if let Some(ref_fasta) = &ref_fasta {
@@ -167,6 +183,9 @@ impl<F: ReadFilter> BaseProcessor<F> {
             mate_fix,
             coord_base,
             read_filter,
+            max_depth,
+            // Set cutoff to 1% of whatever max_depth is.
+            max_depth_warnings_cutoff: max_depth - (max_depth as f64 * 0.01) as u32,
         }
     }
 }
@@ -180,7 +199,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
     fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<PileupPosition> {
-        info!("Processing region {}:{}-{}", tid, start, stop);
+        info!("Processing region {}(tid):{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -195,11 +214,12 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         reader.fetch(tid, start, stop).expect("Fetched a region");
         // Walk over pileups
         let mut pileup = reader.pileup();
-        pileup.set_max_depth(i32::max_value().try_into().unwrap());
+        pileup.set_max_depth(std::cmp::min(i32::max_value().try_into().unwrap(), self.max_depth));
         let result: Vec<PileupPosition> = pileup
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
+                let pileup_depth = pileup.depth();
                 if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
                     let mut pos = if self.mate_fix {
                         PileupPosition::from_pileup_mate_aware(pileup, &header, &self.read_filter)
@@ -215,6 +235,9 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                             *seq.get(pos.pos)
                                 .expect("Input SAM does not match reference"),
                         ));
+                    }
+                    if pileup_depth > (self.max_depth_warnings_cutoff) {
+                        pos.near_max_depth = true;
                     }
                     pos.pos += self.coord_base;
                     Some(pos)
@@ -319,10 +342,10 @@ mod tests {
 
         // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
         let base_processor =
-            BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter, cpus);
+            BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter, 500_000,cpus);
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -349,11 +372,12 @@ mod tests {
             true, // mate aware
             1,
             read_filter,
+            500_000,
             cpus,
         );
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()

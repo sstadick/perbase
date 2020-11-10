@@ -41,6 +41,11 @@ pub struct OnlyDepth {
     #[structopt(long, short = "b")]
     bed_file: Option<PathBuf>,
 
+    /// A BCF/VCF file containing positions of interest. If specified, only bases from the given positions will be reported on.
+    /// Note that it may be more efficient to calculate depth over regions if your positions are clustered tightly together.
+    #[structopt(long, short = "B")]
+    bcf_file: Option<PathBuf>,
+
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
@@ -105,6 +110,7 @@ impl OnlyDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.bed_file.clone(),
+            self.bcf_file.clone(),
             Some(cpus),
             self.chunksize.clone(),
             processor,
@@ -275,7 +281,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
             // NB: since we are splitting the region, it's possible the region we are looking at
             // may occur before the ROI, or after the ROI
-            if rec_start > stop || start > rec_stop {
+            if rec_start >= stop || rec_stop <= start {
                 continue;
             }
 
@@ -426,7 +432,7 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
     fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
-        info!("Processing region {}:{}-{}", tid, start, stop);
+        info!("Processing region {}(tid):{}-{}", tid, start, stop);
         if self.fast_mode {
             self.process_region_fast(tid, start, stop)
         } else {
@@ -633,6 +639,7 @@ mod tests {
             bamfile.0,
             None,
             None,
+            None,
             Some(cpus),
             Some(1_000_000),
             onlydepth_processor,
@@ -661,6 +668,7 @@ mod tests {
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
+            None,
             None,
             None,
             Some(cpus),
@@ -693,6 +701,7 @@ mod tests {
             bamfile.0,
             None,
             None,
+            None,
             Some(cpus),
             Some(1_000_000),
             onlydepth_processor,
@@ -723,6 +732,7 @@ mod tests {
             bamfile.0,
             None,
             None,
+            None,
             Some(cpus),
             None,
             onlydepth_processor,
@@ -751,6 +761,7 @@ mod tests {
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
+            None,
             None,
             None,
             Some(cpus),
