@@ -257,7 +257,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
 
     /// Read a BCF/VCF file into a vector of lappers with index representing the TID
     fn bcf_to_intervals(header: &HeaderView, bcf_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
-        let mut bcf_reader = Reader::from_path(bcf_file).expect("Error openging BCF/VCF file.");
+        let mut bcf_reader = Reader::from_path(bcf_file).expect("Error opening BCF/VCF file.");
         let bcf_header_reader = Reader::from_path(bcf_file).expect("Error openging BCF/VCF file.");
         let bcf_header = bcf_header_reader.header();
         let mut intervals = vec![vec![]; header.target_count() as usize];
