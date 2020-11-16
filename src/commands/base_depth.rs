@@ -211,7 +211,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
         // Walk over pileups
         let mut pileup = reader.pileup();
         pileup.set_max_depth(std::cmp::min(i32::max_value().try_into().unwrap(), self.max_depth));

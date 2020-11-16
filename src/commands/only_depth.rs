@@ -264,7 +264,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
 
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties = HashMap::new();
@@ -353,7 +353,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
 
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties = HashMap::new();
