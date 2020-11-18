@@ -51,6 +51,10 @@ pub struct BaseDepth {
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
     threads: usize,
 
+    /// A modifier to change the ration of Bytes / thread to allocate to the channel for printing Positions
+    #[structopt(long, short="C")]
+    channel_size_modifier: Option<f64>, // default set by par_granges at 1.0
+
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c")]
     chunksize: Option<usize>, // default set by par_granges at 1_000_000
@@ -111,6 +115,7 @@ impl BaseDepth {
             self.bcf_file.clone(),
             Some(cpus),
             self.chunksize.clone(),
+            self.channel_size_modifier,
             base_processor,
         );
 
@@ -345,7 +350,7 @@ mod tests {
             BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter, 500_000,cpus);
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, Some(0.001), base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -377,7 +382,7 @@ mod tests {
         );
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None,Some(0.001), base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()

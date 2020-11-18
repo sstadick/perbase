@@ -90,6 +90,7 @@ fn main() -> Result<()> {
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
         None,                                    // optional allowed number of threads, defaults to max
         None,                                  // optional chunksize modification
+        None,                        // optional modifier on the size of the channel for sending Positions
         basic_processor,
     );
 

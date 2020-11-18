@@ -102,6 +102,7 @@
 //!         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
 //!         None,                                 // optional allowed number of threads, defaults to max
 //!         None,                                 // optional chunksize modification
+//!         None,                                 // optional channel size modification
 //!         basic_processor,
 //!     );
 //!

@@ -58,6 +58,10 @@ pub struct OnlyDepth {
     #[structopt(long, short = "c")]
     chunksize: Option<usize>, // default set by par_granges at 1_000_000
 
+    /// A modifier to change the ration of Bytes / thread to allocate to the channel for printing Positions
+    #[structopt(long, short="C")]
+    channel_size_modifier: Option<f64>, // default set by par_granges at 1.0
+
     /// SAM flags to include.
     #[structopt(long, short = "f", default_value = "0")]
     include_flags: u16,
@@ -113,6 +117,7 @@ impl OnlyDepth {
             self.bcf_file.clone(),
             Some(cpus),
             self.chunksize.clone(),
+            self.channel_size_modifier,
             processor,
         );
 
@@ -642,6 +647,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -673,6 +679,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -704,6 +711,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -735,6 +743,7 @@ mod tests {
             None,
             Some(cpus),
             None,
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -766,6 +775,7 @@ mod tests {
             None,
             Some(cpus),
             None,
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();

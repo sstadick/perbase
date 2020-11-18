@@ -15,8 +15,7 @@ use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
 use std::{path::PathBuf, thread, convert::TryInto};
 
-// Allow for 1 GB per thread
-const BYTES_PER_THREAD: usize = 1024 * 1024 * 1024;
+const BYTES_INA_GIGABYTE: usize = 1024 * 1024 * 1024;
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -50,6 +49,8 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
     chunksize: usize,
+    /// A modifier to apply to the channel size formular that is (BYTES_INA_GIGABYTE * channel_size_modifier) * threads / size_of(R::P)
+    channel_size_modifier: f64,
     /// The rayon threadpool to operate in
     pool: rayon::ThreadPool,
     /// The implementation of [RegionProcessor] that will be used to process regions
@@ -68,6 +69,8 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
+    /// * `channel_size_modifier`- Optional argument to modify the default size ration of the channel that `R::P` is sent on.
+    ///                 formula is: ((BYTES_INA_GIGABYTE * channel_size_modifier) * threads) / size_of(R::P)
     /// * `processor`- Something that implements [`RegionProcessor`](RegionProcessor)
     pub fn new(
         reads: PathBuf,
@@ -76,6 +79,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         regions_bcf: Option<PathBuf>,
         threads: Option<usize>,
         chunksize: Option<usize>,
+        channel_size_modifier: Option<f64>,
         processor: R,
     ) -> Self {
         let threads = if let Some(threads) = threads {
@@ -91,20 +95,15 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             .build()
             .unwrap();
 
-        let chunksize = if let Some(chunksize) = chunksize {
-            chunksize
-        } else {
-            1_000_000
-        };
         info!("Using {} worker threads.", threads);
-        info!("Using chunksize of {}.", chunksize);
         Self {
             reads,
             ref_fasta,
             regions_bed,
             regions_bcf,
             threads,
-            chunksize,
+            chunksize: chunksize.unwrap_or(1_000_000),
+            channel_size_modifier: channel_size_modifier.unwrap_or(1.0),
             pool,
             processor,
         }
@@ -124,8 +123,9 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
     pub fn process(self) -> Result<Receiver<R::P>> {
-        info!("Creating channel of length {:?} (* 120 bytes to get mem)", (BYTES_PER_THREAD / std::mem::size_of::<R::P>()) * self.threads);
-        let (snd, rxv) = bounded( (BYTES_PER_THREAD / std::mem::size_of::<R::P>()) * self.threads );
+        let channel_size: usize = ((BYTES_INA_GIGABYTE as f64 * self.channel_size_modifier).floor() as usize / std::mem::size_of::<R::P>()) * self.threads;
+        info!("Creating channel of length {:?} (* 120 bytes to get mem)", channel_size);
+        let (snd, rxv) = bounded( channel_size );
         thread::spawn(move || {
             self.pool.install(|| {
                 info!("Reading from {:?}", self.reads);
@@ -346,8 +346,6 @@ mod test {
     // proptest generate random chunksize, cpus
     proptest! {
         #[test]
-        #[ignore]
-        // This test is expensive, only run it explicitly
         // add random chunksize and random cpus
         // NB: using any larger numbers for this tends to blow up the test runtime
         fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>(), use_vcf in any::<bool>()) {
@@ -414,6 +412,7 @@ mod test {
                 if use_vcf { Some(vcf_path) } else { None }, // do one with vcf regions
                 Some(cpus),
                 Some(chunksize),
+                Some(0.002),
                 test_processor
             );
             let receiver = par_granges_runner.process().expect("Launch ParGranges Process");
