@@ -56,7 +56,7 @@ pub struct BaseDepth {
     chunksize: usize,
 
     /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
-    #[structopt(long, short="C", default_value=par_granges::CHANNEL_SIZE_MODIFIER_STR.as_str())]
+    #[structopt(long, short="C", default_value="0.15")]
     channel_size_modifier: f64,
 
     /// SAM flags to include.
