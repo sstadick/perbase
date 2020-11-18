@@ -14,8 +14,23 @@ use rust_htslib::{
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
 use std::{path::PathBuf, thread, convert::TryInto};
+use lazy_static::lazy_static;
 
 const BYTES_INA_GIGABYTE: usize = 1024 * 1024 * 1024;
+
+/// A modifier to apply to the channel size formular that is (BYTES_INA_GIGABYTE * channel_size_modifier) * threads / size_of(R::P)
+pub const CHANNEL_SIZE_MODIFIER: f64 = 0.15;
+
+/// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
+pub const CHUNKSIZE: usize = 1_000_000;
+
+lazy_static! {
+    /// CHANNEL_SIZE_MODIFIER as a str
+    pub static ref CHANNEL_SIZE_MODIFIER_STR: String = CHANNEL_SIZE_MODIFIER.to_string();
+
+    /// CHUNKSIZE as a str
+    pub static ref CHUNKSIZE_STR: String = CHUNKSIZE.to_string();
+}
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -102,8 +117,8 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             regions_bed,
             regions_bcf,
             threads,
-            chunksize: chunksize.unwrap_or(1_000_000),
-            channel_size_modifier: channel_size_modifier.unwrap_or(1.0),
+            chunksize: chunksize.unwrap_or(CHUNKSIZE),
+            channel_size_modifier: channel_size_modifier.unwrap_or(CHANNEL_SIZE_MODIFIER),
             pool,
             processor,
         }

@@ -55,12 +55,12 @@ pub struct OnlyDepth {
     threads: usize,
 
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
-    #[structopt(long, short = "c")]
-    chunksize: Option<usize>, // default set by par_granges at 1_000_000
+    #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
+    chunksize: usize,
 
-    /// A modifier to change the ration of Bytes / thread to allocate to the channel for printing Positions
-    #[structopt(long, short="C")]
-    channel_size_modifier: Option<f64>, // default set by par_granges at 1.0
+    /// The fraction of a gigabyte to allocate per thread, can be greater than 1.0.
+    #[structopt(long, short="C", default_value=par_granges::CHANNEL_SIZE_MODIFIER_STR.as_str())]
+    channel_size_modifier: f64,
 
     /// SAM flags to include.
     #[structopt(long, short = "f", default_value = "0")]
@@ -116,8 +116,8 @@ impl OnlyDepth {
             self.bed_file.clone(),
             self.bcf_file.clone(),
             Some(cpus),
-            self.chunksize.clone(),
-            self.channel_size_modifier,
+            Some(self.chunksize.clone()),
+            Some(self.channel_size_modifier),
             processor,
         );
 
