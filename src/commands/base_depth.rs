@@ -55,6 +55,7 @@ pub struct BaseDepth {
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: usize,
 
+    // NB: If there are large regions of low coverage, bumping this up may be helpful.
     /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
     #[structopt(long, short="C", default_value="0.15")]
     channel_size_modifier: f64,

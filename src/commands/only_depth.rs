@@ -59,7 +59,7 @@ pub struct OnlyDepth {
     chunksize: usize,
 
     /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
-    #[structopt(long, short="C", default_value="0.01")]
+    #[structopt(long, short="C", default_value="0.001")]
     channel_size_modifier: f64,
 
     /// SAM flags to include.
