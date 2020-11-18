@@ -3,7 +3,7 @@
 //! Iterates over chunked genomic regions in parallel.
 use anyhow::Result;
 use bio::io::bed;
-use crossbeam::channel::{unbounded, Receiver};
+use crossbeam::channel::{bounded, Receiver};
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
@@ -14,6 +14,9 @@ use rust_htslib::{
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
 use std::{path::PathBuf, thread, convert::TryInto};
+
+// Allow for 1 GB per thread
+const BYTES_PER_THREAD: usize = 1024 * 1024 * 1024;
 
 /// RegionProcessor defines the methods that must be implemented to process a region
 pub trait RegionProcessor {
@@ -121,9 +124,8 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
     pub fn process(self) -> Result<Receiver<R::P>> {
-        // let mut writer = self.get_writer()?;
-
-        let (snd, rxv) = unbounded();
+        info!("Creating channel of length {:?} (* 120 bytes to get mem)", (BYTES_PER_THREAD / std::mem::size_of::<R::P>()) * self.threads);
+        let (snd, rxv) = bounded( (BYTES_PER_THREAD / std::mem::size_of::<R::P>()) * self.threads );
         thread::spawn(move || {
             self.pool.install(|| {
                 info!("Reading from {:?}", self.reads);
@@ -205,9 +207,6 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 }
             });
         });
-        // rxv.into_iter()
-        //     .for_each(|pos| writer.serialize(pos).unwrap());
-        // writer.flush()?;
         Ok(rxv)
     }
 
@@ -347,6 +346,8 @@ mod test {
     // proptest generate random chunksize, cpus
     proptest! {
         #[test]
+        #[ignore]
+        // This test is expensive, only run it explicitly
         // add random chunksize and random cpus
         // NB: using any larger numbers for this tends to blow up the test runtime
         fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>(), use_vcf in any::<bool>()) {
