@@ -49,7 +49,7 @@ impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
         let header = reader.header().to_owned();
         // fetch the region
-        reader.fetch(tid, start, stop).expect("Fetched ROI");
+        reader.fetch((tid, start, stop)).expect("Fetched ROI");
         // Walk over pileups
         let result: Vec<PileupPosition> = reader
             .pileup()
@@ -90,6 +90,7 @@ fn main() -> Result<()> {
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
         None,                                    // optional allowed number of threads, defaults to max
         None,                                  // optional chunksize modification
+        None,                        // optional modifier on the size of the channel for sending Positions
         basic_processor,
     );
 

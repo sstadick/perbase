@@ -24,7 +24,7 @@ name = "perbase"
 path = "src/main.rs"
 
 [dependencies]
-rust-htslib = "0.32.0"
+rust-htslib = { git = "https://github.com/rust-bio/rust-htslib", branch = "master" }
 log = "0.4.11"
 env_logger = "0.7.1"
 anyhow = "1.0.32"

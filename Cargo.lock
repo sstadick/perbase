@@ -566,9 +566,8 @@ dependencies = [
 
 [[package]]
 name = "hts-sys"
-version = "1.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7548557013f78aeae1ed2cb5cd2417f4f95d224c875da445facc516a16d914e5"
+version = "1.11.0"
+source = "git+https://github.com/rust-bio/rust-htslib?branch=master#7e85484fa3863fb5d59061e727d4ca8f1613646f"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -599,12 +598,6 @@ dependencies = [
  "unicode-bidi",
  "unicode-normalization",
 ]
-
-[[package]]
-name = "ieee754"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9007da9cacbd3e6343da136e98b0d2df013f553d35bdec8b518f07bea768e19c"
 
 [[package]]
 name = "indexmap"
@@ -1105,14 +1098,12 @@ dependencies = [
 
 [[package]]
 name = "rust-htslib"
-version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0cc6875ef87204babb9a02918942d325a834bdd173d94187d0f38a487cba185"
+version = "0.34.1-alpha.0"
+source = "git+https://github.com/rust-bio/rust-htslib?branch=master#7e85484fa3863fb5d59061e727d4ca8f1613646f"
 dependencies = [
  "bio-types",
  "custom_derive",
  "hts-sys",
- "ieee754",
  "lazy_static",
  "libc",
  "linear-map",
@@ -1391,9 +1382,18 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "0.3.4"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "238ce071d267c5710f9d31451efec16c5ee22de34df17cc05e56cbc92e967117"
+checksum = "b78a366903f506d2ad52ca8dc552102ffdd3e937ba8a227f024dc1d1eae28575"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cda74da7e1a664f795bb1f8a87ec406fb89a02522cf6e50620d016add6dbbf5c"
 
 [[package]]
 name = "triple_accel"
@@ -1412,18 +1412,18 @@ dependencies = [
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fb19cf769fa8c6a80a162df694621ebeb4dafb606470b2b2fce0be40a98a977"
+checksum = "b7f98e67a4d84f730d343392f9bfff7d21e3fca562b9cb7a43b768350beeddc6"
 dependencies = [
  "tinyvec",
 ]
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e83e153d1053cbb5a118eeff7fd5be06ed99153f00dbcd8ae310c5fb2b22edc0"
+checksum = "db8716a166f290ff49dabc18b44aa407cb7c6dbe1aa0971b44b8a24b0ca35aae"
 
 [[package]]
 name = "unicode-width"

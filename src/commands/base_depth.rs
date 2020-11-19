@@ -52,8 +52,13 @@ pub struct BaseDepth {
     threads: usize,
 
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
-    #[structopt(long, short = "c")]
-    chunksize: Option<usize>, // default set by par_granges at 1_000_000
+    #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
+    chunksize: usize,
+
+    // NB: If there are large regions of low coverage, bumping this up may be helpful.
+    /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
+    #[structopt(long, short="C", default_value="0.15")]
+    channel_size_modifier: f64,
 
     /// SAM flags to include.
     #[structopt(long, short = "f", default_value = "0")]
@@ -110,7 +115,8 @@ impl BaseDepth {
             self.bed_file.clone(),
             self.bcf_file.clone(),
             Some(cpus),
-            self.chunksize.clone(),
+            Some(self.chunksize.clone()),
+            Some(self.channel_size_modifier),
             base_processor,
         );
 
@@ -211,7 +217,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
         // Walk over pileups
         let mut pileup = reader.pileup();
         pileup.set_max_depth(std::cmp::min(i32::max_value().try_into().unwrap(), self.max_depth));
@@ -345,7 +351,7 @@ mod tests {
             BaseProcessor::new(bamfile.0.clone(), None, false, 1, read_filter, 500_000,cpus);
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, Some(0.001), base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()
@@ -377,7 +383,7 @@ mod tests {
         );
 
         let par_granges_runner =
-            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None, base_processor);
+            par_granges::ParGranges::new(bamfile.0, None, None, None, Some(cpus), None,Some(0.001), base_processor);
         let mut positions = HashMap::new();
         par_granges_runner
             .process()

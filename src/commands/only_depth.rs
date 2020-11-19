@@ -55,8 +55,12 @@ pub struct OnlyDepth {
     threads: usize,
 
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
-    #[structopt(long, short = "c")]
-    chunksize: Option<usize>, // default set by par_granges at 1_000_000
+    #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
+    chunksize: usize,
+
+    /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
+    #[structopt(long, short="C", default_value="0.001")]
+    channel_size_modifier: f64,
 
     /// SAM flags to include.
     #[structopt(long, short = "f", default_value = "0")]
@@ -112,7 +116,8 @@ impl OnlyDepth {
             self.bed_file.clone(),
             self.bcf_file.clone(),
             Some(cpus),
-            self.chunksize.clone(),
+            Some(self.chunksize.clone()),
+            Some(self.channel_size_modifier),
             processor,
         );
 
@@ -264,7 +269,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
 
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties = HashMap::new();
@@ -353,7 +358,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         let header = reader.header().to_owned();
         // fetch the region of interest
-        reader.fetch(tid, start, stop).expect("Fetched a region");
+        reader.fetch((tid, start, stop)).expect("Fetched a region");
 
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties = HashMap::new();
@@ -642,6 +647,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -673,6 +679,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -704,6 +711,7 @@ mod tests {
             None,
             Some(cpus),
             Some(1_000_000),
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -735,6 +743,7 @@ mod tests {
             None,
             Some(cpus),
             None,
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
@@ -766,6 +775,7 @@ mod tests {
             None,
             Some(cpus),
             None,
+            Some(0.001),
             onlydepth_processor,
         );
         let mut positions = HashMap::new();
