@@ -16,13 +16,13 @@ use perbase_lib::{
 use rust_htslib::{bam, bam::ext::BamRecordExtensions, bam::record::Cigar, bam::Read};
 use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
-use std::convert::TryFrom;
 use std::{
     collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
 };
+use std::{convert::TryFrom, rc::Rc};
 use structopt::StructOpt;
 use termcolor::ColorChoice;
 
@@ -56,10 +56,10 @@ pub struct OnlyDepth {
 
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
-    chunksize: usize,
+    chunksize: u32,
 
     /// The fraction of a gigabyte to allocate per thread for message passing, can be greater than 1.0.
-    #[structopt(long, short="C", default_value="0.001")]
+    #[structopt(long, short = "C", default_value = "0.001")]
     channel_size_modifier: f64,
 
     /// SAM flags to include.
@@ -174,7 +174,7 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
     /// 0-based or 1-based coordinate output
-    coord_base: usize,
+    coord_base: u32,
 }
 
 impl<F: ReadFilter> OnlyDepthProcessor<F> {
@@ -185,7 +185,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         mate_fix: bool,
         fast_mode: bool,
         no_merge: bool,
-        coord_base: usize,
+        coord_base: u32,
         read_filter: F,
     ) -> Self {
         Self {
@@ -200,12 +200,13 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     /// Sum the counts within the region to get the depths at each RangePosition
+    #[inline]
     fn sum_counter(
         &self,
         counter: Vec<i32>,
         contig: &str,
-        region_start: u64,
-        region_stop: u64,
+        region_start: u32,
+        region_stop: u32,
     ) -> Vec<RangePositions> {
         if self.no_merge {
             let mut sum: i32 = 0;
@@ -215,10 +216,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 if sum != 0 {
                     let mut pos = RangePositions::new(
                         String::from(contig),
-                        region_start as usize + i + self.coord_base,
+                        region_start + i as u32 + self.coord_base,
                     );
-                    pos.depth = usize::try_from(sum).expect("All depths are positive");
-                    pos.end = region_start as usize + i + self.coord_base + 1;
+                    pos.depth = u32::try_from(sum).expect("All depths are positive");
+                    pos.end = region_start + i as u32 + self.coord_base + 1;
                     results.push(pos);
                 }
             }
@@ -227,7 +228,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             // Sum the counter and merge same-depth ranges of positions
             let mut sum: i32 = 0;
             let mut results = vec![];
-            let mut curr_start = region_start as usize;
+            let mut curr_start = region_start;
             let mut curr_depth = counter[0];
             for (i, count) in counter.iter().enumerate() {
                 sum += count;
@@ -235,10 +236,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 if curr_depth != sum {
                     let mut pos =
                         RangePositions::new(String::from(contig), curr_start + self.coord_base);
-                    pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
-                    pos.end = region_start as usize + i + self.coord_base;
+                    pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
+                    pos.end = region_start + i as u32 + self.coord_base;
 
-                    curr_start = region_start as usize + i;
+                    curr_start = region_start + i as u32;
                     curr_depth = sum;
                     results.push(pos);
                 }
@@ -247,8 +248,8 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                     // We've hit the end
                     let mut pos =
                         RangePositions::new(String::from(contig), curr_start + self.coord_base);
-                    pos.depth = usize::try_from(curr_depth).expect("All depths are positive");
-                    pos.end = region_stop as usize + self.coord_base;
+                    pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
+                    pos.end = region_stop + self.coord_base;
                     results.push(pos);
                 }
             }
@@ -257,7 +258,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     /// Process a region, taking into account REF_SKIPs and mates
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -276,13 +277,13 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         // Walk over each read, counting the starts and ends
         for record in reader
-            .records()
+            .rc_records()
             .map(|r| r.expect("Read record"))
             .filter(|read| self.read_filter.filter_read(&read))
             .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
         {
-            let rec_start = u64::try_from(record.0).expect("check overflow");
-            let rec_stop = u64::try_from(record.1).expect("check overflow");
+            let rec_start = u32::try_from(record.0).expect("check overflow");
+            let rec_stop = u32::try_from(record.1).expect("check overflow");
 
             // NB: since we are splitting the region, it's possible the region we are looking at
             // may occur before the ROI, or after the ROI
@@ -346,7 +347,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         self.sum_counter(counter, contig, start, stop)
     }
 
-    fn process_region_fast(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+    fn process_region_fast(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -365,12 +366,12 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
         // Walk over each read, counting the starts and ends
         for record in reader
-            .records()
+            .rc_records()
             .map(|r| r.expect("Read record"))
             .filter(|read| self.read_filter.filter_read(&read))
         {
-            let rec_start = u64::try_from(record.reference_start()).expect("check overflow");
-            let rec_stop = u64::try_from(record.reference_end()).expect("check overflow");
+            let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
+            let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");
 
             // rectify start / stop with region boundaries
             // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
@@ -436,7 +437,7 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<RangePositions> {
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
         info!("Processing region {}(tid):{}-{}", tid, start, stop);
         if self.fast_mode {
             self.process_region_fast(tid, start, stop)
@@ -454,10 +455,10 @@ struct IterAlignedBlocks {
     cigar_index: usize,
     cigar: bam::record::CigarStringView,
     overlap_status: bool,
-    record: bam::Record,
+    record: Rc<bam::Record>,
 }
 impl IterAlignedBlocks {
-    fn new(record: bam::Record, check_mate: bool) -> Self {
+    fn new(record: Rc<bam::Record>, check_mate: bool) -> Self {
         let overlap = if check_mate {
             OnlyDepth::maybe_overlaps_mate(&record)
         } else {

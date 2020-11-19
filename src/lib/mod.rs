@@ -57,7 +57,7 @@
 //!     type P = PileupPosition;
 //!
 //!     // This function receives an interval to examine.
-//!     fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
+//!     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
 //!         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
 //!         let header = reader.header().to_owned();
 //!         // fetch the region
@@ -69,7 +69,7 @@
 //!                 let pileup = p.expect("Extracted a pileup");
 //!                 // Verify that we are within the bounds of the chunk we are iterating on
 //!                 // Since pileup will pull reads that overhang edges.
-//!                 if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
+//!                 if pileup.pos() >= start && pileup.pos() < stop {
 //!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter))
 //!                 } else {
 //!                     None

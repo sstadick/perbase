@@ -3,7 +3,7 @@ use anyhow::Result;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::pileup_position::PileupPosition,
-    read_filter::ReadFilter
+    read_filter::ReadFilter,
 };
 use rust_htslib::bam::{self, record::Record, Read};
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
     type P = PileupPosition;
 
     // This function receives an interval to examine.
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
         let header = reader.header().to_owned();
         // fetch the region
@@ -57,8 +57,12 @@ impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
                 let pileup = p.expect("Extracted a pileup");
                 // Verify that we are within the bounds of the chunk we are iterating on
                 // Since pileup will pull reads that overhang edges.
-                if (pileup.pos() as u64) >= start && (pileup.pos() as u64) < stop {
-                    Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter))
+                if pileup.pos() >= start && pileup.pos() < stop {
+                    Some(PileupPosition::from_pileup(
+                        pileup,
+                        &header,
+                        &self.read_filter,
+                    ))
                 } else {
                     None
                 }
@@ -84,13 +88,13 @@ fn main() -> Result<()> {
 
     // Create a par_granges runner
     let par_granges_runner = par_granges::ParGranges::new(
-        PathBuf::from("test/test.bam"),             // pass in bam
-        None,                                   // optional ref fasta
-        None,                                 // optional bcf/vcf file to specify positions of interest
+        PathBuf::from("test/test.bam"),       // pass in bam
+        None,                                 // optional ref fasta
+        None, // optional bcf/vcf file to specify positions of interest
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
-        None,                                    // optional allowed number of threads, defaults to max
-        None,                                  // optional chunksize modification
-        None,                        // optional modifier on the size of the channel for sending Positions
+        None, // optional allowed number of threads, defaults to max
+        None, // optional chunksize modification
+        None, // optional modifier on the size of the channel for sending Positions
         basic_processor,
     );
 

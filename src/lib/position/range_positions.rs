@@ -4,7 +4,7 @@
 use crate::position::Position;
 use serde::Serialize;
 use smartstring::alias::String;
-use std::{default};
+use std::default;
 
 /// Hold all information about a range of positions.
 #[derive(Debug, Serialize, Default)]
@@ -14,16 +14,16 @@ pub struct RangePositions {
     #[serde(rename = "REF")]
     pub ref_seq: String,
     /// 1-based position in the sequence.
-    pub pos: usize,
+    pub pos: u32,
     /// The point at which this depth ends, non-inclusive
-    pub end: usize,
+    pub end: u32,
     /// Total depth at this position.
-    pub depth: usize,
+    pub depth: u32,
 }
 
 impl Position for RangePositions {
     /// Create a new position for the given ref_seq name.
-    fn new(ref_seq: String, pos: usize) -> Self {
+    fn new(ref_seq: String, pos: u32) -> Self {
         RangePositions {
             ref_seq,
             pos,

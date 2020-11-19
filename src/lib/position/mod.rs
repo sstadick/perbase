@@ -8,6 +8,6 @@ use smartstring::alias::String;
 /// A serializable object meant to hold all information about a position.
 pub trait Position: Default + Serialize {
     /// Create a new position with all other values zeroed
-    fn new(ref_seq: String, pos: usize) -> Self;
+    fn new(ref_seq: String, pos: u32) -> Self;
 }
 
