@@ -15,12 +15,12 @@ jobs:
           - os: ubuntu-latest
             artifact_name: perbase
             asset_name: perbase-linux-amd64
+         - os: macos-latest
+           artifact_name: perbase
+           asset_name: perbase-macos-amd64
           # - os: windows-latest
           #   artifact_name: perbase.exe
           #   asset_name: perbase-windows-amd64
-           - os: macos-latest
-             artifact_name: perbase
-             asset_name: perbase-macos-amd64
 
     steps:
       - uses: actions/checkout@v2
