@@ -4,17 +4,17 @@
 use anyhow::Result;
 use bio::io::bed;
 use crossbeam::channel::{bounded, Receiver};
+use lazy_static::lazy_static;
 use log::*;
 use num_cpus;
 use rayon::prelude::*;
 use rust_htslib::{
     bam::{HeaderView, IndexedReader, Read},
-    bcf::{Reader, Read as bcfRead}
+    bcf::{Read as bcfRead, Reader},
 };
 use rust_lapper::{Interval, Lapper};
 use serde::Serialize;
-use std::{path::PathBuf, thread, convert::TryInto};
-use lazy_static::lazy_static;
+use std::{convert::TryInto, path::PathBuf, thread};
 
 const BYTES_INA_GIGABYTE: usize = 1024 * 1024 * 1024;
 
@@ -23,7 +23,7 @@ const BYTES_INA_GIGABYTE: usize = 1024 * 1024 * 1024;
 pub const CHANNEL_SIZE_MODIFIER: f64 = 0.15;
 
 /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
-pub const CHUNKSIZE: usize = 1_000_000;
+pub const CHUNKSIZE: u32 = 1_000_000;
 
 lazy_static! {
     /// CHANNEL_SIZE_MODIFIER as a str
@@ -44,7 +44,7 @@ pub trait RegionProcessor {
     /// A function that takes the tid, start, and stop and returns something serializable.
     /// Note, a common use of this function will be a `fetch` -> `pileup`. The pileup must
     /// be bounds checked.
-    fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P>;
+    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P>;
 }
 
 /// ParGranges holds all the information and configuration needed to launch the
@@ -64,7 +64,7 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     /// Number of threads this is allowed to use, uses all if None
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
-    chunksize: usize,
+    chunksize: u32,
     /// A modifier to apply to the channel size formular that is (BYTES_INA_GIGABYTE * channel_size_modifier) * threads / size_of(R::P)
     channel_size_modifier: f64,
     /// The rayon threadpool to operate in
@@ -94,7 +94,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         regions_bed: Option<PathBuf>,
         regions_bcf: Option<PathBuf>,
         threads: Option<usize>,
-        chunksize: Option<usize>,
+        chunksize: Option<u32>,
         channel_size_modifier: Option<f64>,
         processor: R,
     ) -> Self {
@@ -139,9 +139,15 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// Note, a common use case of this will be to fetch a region and do a pileup. The bounds of bases being looked at should still be
     /// checked since a fetch will pull all reads that overlap the region in question.
     pub fn process(self) -> Result<Receiver<R::P>> {
-        let channel_size: usize = ((BYTES_INA_GIGABYTE as f64 * self.channel_size_modifier).floor() as usize / std::mem::size_of::<R::P>()) * self.threads;
-        info!("Creating channel of length {:?} (* 120 bytes to get mem)", channel_size);
-        let (snd, rxv) = bounded( channel_size );
+        let channel_size: usize = ((BYTES_INA_GIGABYTE as f64 * self.channel_size_modifier).floor()
+            as usize
+            / std::mem::size_of::<R::P>())
+            * self.threads;
+        info!(
+            "Creating channel of length {:?} (* 120 bytes to get mem)",
+            channel_size
+        );
+        let (snd, rxv) = bounded(channel_size);
         thread::spawn(move || {
             self.pool.install(|| {
                 info!("Reading from {:?}", self.reads);
@@ -155,16 +161,26 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
 
                 // Work out if we are restricted to a subset of sites
                 let bed_intervals = if let Some(regions_bed) = &self.regions_bed {
-                    Some(Self::bed_to_intervals(&header, regions_bed).expect("Parsed BED to intervals"))
-                } else { None };
+                    Some(
+                        Self::bed_to_intervals(&header, regions_bed)
+                            .expect("Parsed BED to intervals"),
+                    )
+                } else {
+                    None
+                };
                 let bcf_intervals = if let Some(regions_bcf) = &self.regions_bcf {
-                    Some(Self::bcf_to_intervals(&header, regions_bcf).expect("Parsed BCF/VCF to intervals"))
-                } else { None };
+                    Some(
+                        Self::bcf_to_intervals(&header, regions_bcf)
+                            .expect("Parsed BCF/VCF to intervals"),
+                    )
+                } else {
+                    None
+                };
                 let restricted_ivs = match (bed_intervals, bcf_intervals) {
                     (Some(bed_ivs), Some(bcf_ivs)) => Some(Self::merge_intervals(bed_ivs, bcf_ivs)),
                     (Some(bed_ivs), None) => Some(bed_ivs),
                     (None, Some(bcf_ivs)) => Some(bcf_ivs),
-                    (None, None) => None
+                    (None, None) => None,
                 };
 
                 let intervals = if let Some(restricted) = restricted_ivs {
@@ -177,30 +193,33 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 // The number positions to try to process in one batch
                 let serial_step_size = self
                     .chunksize
-                    .checked_mul(self.threads)
-                    .unwrap_or(usize::MAX); // aka superchunk
+                    .checked_mul(self.threads as u32)
+                    .unwrap_or(u32::MAX); // aka superchunk
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
-                    let tid_end = header.target_len(tid).unwrap() as u64;
+                    let tid_end: u32 = header.target_len(tid).unwrap().try_into().unwrap();
                     // Result holds the processed positions to be sent to writer
                     let mut result = vec![];
-                    for chunk_start in (0..tid_end).step_by(serial_step_size) {
+                    for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
                         let tid_name = std::str::from_utf8(header.tid2name(tid)).unwrap();
                         let chunk_end =
-                            std::cmp::min(chunk_start + serial_step_size as u64, tid_end);
-                        info!("Batch Processing {}:{}-{}", tid_name, chunk_start, chunk_end);
+                            std::cmp::min(chunk_start as u32 + serial_step_size, tid_end);
+                        info!(
+                            "Batch Processing {}:{}-{}",
+                            tid_name, chunk_start, chunk_end
+                        );
                         let (r, _) = rayon::join(
                             || {
                                 // Must be a vec so that par_iter works and results stay in order
-                                let ivs: Vec<Interval<u64, ()>> = intervals
-                                    .find(chunk_start, chunk_end)
-                                    // Truncate intervals that extend forward or backward of chunk in question
-                                    .map(|iv| Interval {
-                                        start: std::cmp::max(iv.start, chunk_start),
-                                        stop: std::cmp::min(iv.stop, chunk_end),
-                                        val: (),
-                                    })
-                                    .collect();
+                                let ivs: Vec<Interval<u32, ()>> =
+                                    Lapper::<u32, ()>::find(&intervals, chunk_start, chunk_end)
+                                        // Truncate intervals that extend forward or backward of chunk in question
+                                        .map(|iv| Interval {
+                                            start: std::cmp::max(iv.start, chunk_start),
+                                            stop: std::cmp::min(iv.stop, chunk_end),
+                                            val: (),
+                                        })
+                                        .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
                                         info!("Processing {}:{}-{}", tid_name, iv.start, iv.stop);
@@ -227,14 +246,14 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     }
 
     // Convert the header into intervals of equally sized chunks. The last interval may be short.
-    fn header_to_intervals(header: &HeaderView, chunksize: usize) -> Result<Vec<Lapper<u64, ()>>> {
+    fn header_to_intervals(header: &HeaderView, chunksize: u32) -> Result<Vec<Lapper<u32, ()>>> {
         let mut intervals = vec![vec![]; header.target_count() as usize];
         for tid in 0..(header.target_count()) {
-            let tid_len = header.target_len(tid).unwrap();
-            for start in (0..tid_len).step_by(chunksize) {
-                let stop = std::cmp::min(start + chunksize as u64, tid_len);
+            let tid_len: u32 = header.target_len(tid).unwrap().try_into().unwrap();
+            for start in (0..tid_len).step_by(chunksize as usize) {
+                let stop = std::cmp::min(start as u32 + chunksize, tid_len);
                 intervals[tid as usize].push(Interval {
-                    start: start,
+                    start: start as u32,
                     stop: stop,
                     val: (),
                 });
@@ -245,7 +264,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
 
     /// Read a bed file into a vector of lappers with the index representing the TID
     // TODO add a proper error message
-    fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
+    fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];
         for record in bed_reader.records() {
@@ -254,8 +273,8 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 .tid(record.chrom().as_bytes())
                 .expect("Chromosome not found in BAM/CRAM header");
             intervals[tid as usize].push(Interval {
-                start: record.start(),
-                stop: record.end(),
+                start: record.start().try_into().unwrap(),
+                stop: record.end().try_into().unwrap(),
                 val: (),
             });
         }
@@ -271,7 +290,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     }
 
     /// Read a BCF/VCF file into a vector of lappers with index representing the TID
-    fn bcf_to_intervals(header: &HeaderView, bcf_file: &PathBuf) -> Result<Vec<Lapper<u64, ()>>> {
+    fn bcf_to_intervals(header: &HeaderView, bcf_file: &PathBuf) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bcf_reader = Reader::from_path(bcf_file).expect("Error opening BCF/VCF file.");
         let bcf_header_reader = Reader::from_path(bcf_file).expect("Error opening BCF/VCF file.");
         let bcf_header = bcf_header_reader.header();
@@ -280,31 +299,47 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         for record in bcf_reader.records() {
             let record = record?;
             let record_rid = bcf_header.rid2name(record.rid().unwrap()).unwrap();
-            let tid = header.tid(record_rid).expect("Chromosome not found in BAM/CRAM header");
-            let pos: u64 = record.pos().try_into().expect("Got a negative value for pos");
+            let tid = header
+                .tid(record_rid)
+                .expect("Chromosome not found in BAM/CRAM header");
+            let pos: u32 = record
+                .pos()
+                .try_into()
+                .expect("Got a negative value for pos");
             intervals[tid as usize].push(Interval {
-                start: pos, stop: pos + 1, val: ()
+                start: pos,
+                stop: pos + 1,
+                val: (),
             });
         }
 
-        Ok(intervals.into_iter().map(|ivs| {
-            let mut lapper = Lapper::new(ivs);
-            lapper.merge_overlaps();
-            lapper
-        }).collect())
+        Ok(intervals
+            .into_iter()
+            .map(|ivs| {
+                let mut lapper = Lapper::new(ivs);
+                lapper.merge_overlaps();
+                lapper
+            })
+            .collect())
     }
 
     /// Merge two sets of restriction intervals together
-    fn merge_intervals(a_ivs: Vec<Lapper<u64, ()>>, b_ivs: Vec<Lapper<u64, ()>>) -> Vec<Lapper<u64, ()>> {
+    fn merge_intervals(
+        a_ivs: Vec<Lapper<u32, ()>>,
+        b_ivs: Vec<Lapper<u32, ()>>,
+    ) -> Vec<Lapper<u32, ()>> {
         let mut intervals = vec![vec![]; a_ivs.len()];
         for (i, (a_lapper, b_lapper)) in a_ivs.into_iter().zip(b_ivs.into_iter()).enumerate() {
             intervals[i] = a_lapper.into_iter().chain(b_lapper.into_iter()).collect();
         }
-        intervals.into_iter().map(|ivs| {
-            let mut lapper = Lapper::new(ivs);
-            lapper.merge_overlaps();
-            lapper
-        }).collect()
+        intervals
+            .into_iter()
+            .map(|ivs| {
+                let mut lapper = Lapper::new(ivs);
+                lapper.merge_overlaps();
+                lapper
+            })
+            .collect()
     }
 }
 
@@ -364,7 +399,7 @@ mod test {
         #[test]
         // add random chunksize and random cpus
         // NB: using any larger numbers for this tends to blow up the test runtime
-        fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<usize>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>(), use_vcf in any::<bool>()) {
+        fn interval_set(chromosomes in arb_chrs(4, 10_000, 1_000), chunksize in any::<u32>(), cpus in 0..num_cpus::get(), use_bed in any::<bool>(), use_vcf in any::<bool>()) {
             let tempdir = tempdir().unwrap();
             let bam_path = tempdir.path().join("test.bam");
             let bed_path = tempdir.path().join("test.bed");
@@ -464,11 +499,11 @@ mod test {
     impl RegionProcessor for TestProcessor {
         type P = PileupPosition;
 
-        fn process_region(&self, tid: u32, start: u64, stop: u64) -> Vec<Self::P> {
+        fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
             let mut results = vec![];
             for i in start..stop {
                 let chr = SmartString::from(&tid.to_string());
-                let pos = PileupPosition::new(chr, i as usize);
+                let pos = PileupPosition::new(chr, i);
                 results.push(pos);
             }
             results

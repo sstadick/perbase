@@ -12,6 +12,8 @@ use smartstring::alias::String;
 use std::{cmp::Ordering, default};
 
 /// Hold all information about a position.
+// NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
+// There is no reason to go bigger, for now at least
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct PileupPosition {
@@ -19,38 +21,38 @@ pub struct PileupPosition {
     #[serde(rename = "REF")]
     pub ref_seq: String,
     /// 1-based position in the sequence.
-    pub pos: usize,
+    pub pos: u32,
     /// The reference base at this position.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_base: Option<char>,
     /// Total depth at this position.
-    pub depth: usize,
+    pub depth: u32,
     /// Number of A bases at this position.
-    pub a: usize,
+    pub a: u32,
     /// Number of C bases at this position.
-    pub c: usize,
+    pub c: u32,
     /// Number of G bases at this position.
-    pub g: usize,
+    pub g: u32,
     /// Number of T bases at this position.
-    pub t: usize,
+    pub t: u32,
     /// Number of N bases at this position. Any unrecognized base will be counted as an N.
-    pub n: usize,
+    pub n: u32,
     /// Number of insertions that start to the right of this position.
     /// Does not count toward depth.
-    pub ins: usize,
+    pub ins: u32,
     /// Number of deletions at this position.
-    pub del: usize,
+    pub del: u32,
     /// Number of refskips at this position. Does not count toward depth.
-    pub ref_skip: usize,
+    pub ref_skip: u32,
     /// Number of reads failing filters at this position.
-    pub fail: usize,
+    pub fail: u32,
     /// Depth is within 1% of max_depth
-    pub near_max_depth: bool
+    pub near_max_depth: bool,
 }
 
 impl Position for PileupPosition {
     /// Create a new position for the given ref_seq name.
-    fn new(ref_seq: String, pos: usize) -> Self {
+    fn new(ref_seq: String, pos: u32) -> Self {
         PileupPosition {
             ref_seq,
             pos,
@@ -61,6 +63,7 @@ impl Position for PileupPosition {
 
 impl PileupPosition {
     /// Given a record, update the counts at this position
+    #[inline(always)]
     fn update<F: ReadFilter>(&mut self, alignment: &Alignment, record: Record, read_filter: &F) {
         if !read_filter.filter_read(&record) {
             self.depth -= 1;
@@ -103,6 +106,7 @@ impl PileupPosition {
     /// * `pileup` - a pileup at a genomic position
     /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    #[inline]
     pub fn from_pileup<F: ReadFilter>(
         pileup: Pileup,
         header: &bam::HeaderView,
@@ -110,12 +114,12 @@ impl PileupPosition {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
-        pos.depth = pileup.depth() as usize;
+        let mut pos = Self::new(String::from(name), pileup.pos());
+        pos.depth = pileup.depth();
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            &pos.update(&alignment, record, read_filter);
+            Self::update(&mut pos, &alignment, record, read_filter);
         }
         pos
     }
@@ -135,6 +139,7 @@ impl PileupPosition {
     /// * `pileup` - a pileup at a genomic position
     /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    #[inline]
     pub fn from_pileup_mate_aware<F: ReadFilter>(
         pileup: Pileup,
         header: &bam::HeaderView,
@@ -142,8 +147,8 @@ impl PileupPosition {
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
-        let mut pos = Self::new(String::from(name), (pileup.pos()) as usize);
-        pos.depth = pileup.depth() as usize;
+        let mut pos = Self::new(String::from(name), pileup.pos());
+        pos.depth = pileup.depth();
 
         // Group records by qname
         let grouped_by_qname = pileup
@@ -183,7 +188,7 @@ impl PileupPosition {
                 .unwrap();
             // decrement depth for each read not used
             pos.depth -= total_reads - 1;
-            pos.update(&alignment, record, read_filter);
+            Self::update(&mut pos, &alignment, record, read_filter);
         }
         pos
     }
