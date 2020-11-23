@@ -1,7 +1,6 @@
 extern crate perbase_lib;
 pub mod commands;
 use anyhow::Result;
-// use argh::FromArgs;
 use commands::*;
 use env_logger::Env;
 use log::*;
