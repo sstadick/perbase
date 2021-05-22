@@ -5,8 +5,6 @@
 //! insertions / deletions at each position.
 use anyhow::Result;
 use bio::io::fasta::IndexedReader;
-use csv;
-use grep_cli::stdout;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
@@ -15,14 +13,8 @@ use perbase_lib::{
     reference, utils,
 };
 use rust_htslib::{bam, bam::Read};
-use std::{
-    convert::TryInto,
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-};
+use std::{convert::TryInto, path::PathBuf};
 use structopt::StructOpt;
-use termcolor::ColorChoice;
 
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
@@ -46,6 +38,10 @@ pub struct BaseDepth {
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
+
+    /// Optionally bgzip the output.
+    #[structopt(long, short = "Z")]
+    bgzip: bool,
 
     /// The number of threads to use.
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
@@ -95,7 +91,7 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = self.get_writer()?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -127,19 +123,6 @@ impl BaseDepth {
             .for_each(|pos| writer.serialize(pos).unwrap());
         writer.flush()?;
         Ok(())
-    }
-
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
     }
 }
 

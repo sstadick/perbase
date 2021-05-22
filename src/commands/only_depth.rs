@@ -4,8 +4,6 @@
 //! the [`mosdepth`](https://academic.oup.com/bioinformatics/article/doi/10.1093/bioinformatics/btx699/4583630?guestAccessKey=35b55064-4566-4ab3-a769-32916fa1c6e6)
 //! paper.
 use anyhow::Result;
-use csv;
-use grep_cli::stdout;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
@@ -16,15 +14,9 @@ use perbase_lib::{
 use rust_htslib::{bam, bam::ext::BamRecordExtensions, bam::record::Cigar, bam::Read};
 use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 use std::{convert::TryFrom, rc::Rc};
 use structopt::StructOpt;
-use termcolor::ColorChoice;
 
 /// Calculate the only the depth at each base.
 #[derive(StructOpt)]
@@ -49,6 +41,10 @@ pub struct OnlyDepth {
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
+
+    /// Optionally bgzip the output.
+    #[structopt(long, short = "Z")]
+    bgzip: bool,
 
     /// The number of threads to use.
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
@@ -96,7 +92,7 @@ impl OnlyDepth {
         info!("Running only-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = self.get_writer()?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -128,19 +124,6 @@ impl OnlyDepth {
             .for_each(|pos| writer.serialize(pos).unwrap());
         writer.flush()?;
         Ok(())
-    }
-
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
     }
 
     /// Detect an overlap of mates
