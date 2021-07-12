@@ -1,16 +1,10 @@
 use anyhow::Result;
-use csv;
-use grep_cli::stdout;
 use log::*;
+use perbase_lib::utils;
 use serde::{Deserialize, Serialize};
 use smartstring::alias::*;
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Write},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 use structopt::StructOpt;
-use termcolor::ColorChoice;
 
 /// Merge adjacent intervals that have the same depth. Input must be sorted like:
 /// `sort -k1,1 -k2,2n in.bed > in.sorted.bed`
@@ -27,6 +21,10 @@ pub struct MergeAdjacent {
     #[structopt(long, short = "n")]
     no_header: bool,
 
+    /// Optionally bgzip the output.
+    #[structopt(long, short = "Z")]
+    bgzip: bool,
+
     /// The output location, defaults to STDOUT
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
@@ -34,8 +32,15 @@ pub struct MergeAdjacent {
 
 impl MergeAdjacent {
     pub fn run(&self) -> Result<()> {
-        let mut reader = self.get_reader()?;
-        let mut writer = self.get_writer()?;
+        let mut reader = utils::get_reader(
+            &self.in_file,
+            !self.no_header,
+            self.in_file
+                .as_ref()
+                .map(utils::is_bgzipped)
+                .unwrap_or(false),
+        )?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
         let mut iter = reader.deserialize().map(|r| {
             let rec: BedLike = r.expect("Deserialzied record");
             rec
@@ -91,34 +96,6 @@ impl MergeAdjacent {
         }
 
         Ok(())
-    }
-
-    /// Open a CSV Reader from file or stdin
-    fn get_reader(&self) -> Result<csv::Reader<Box<dyn Read>>> {
-        let raw_reader: Box<dyn Read> = match &self.in_file {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufReader::new(File::open(path)?))
-            }
-            _ => Box::new(std::io::stdin()),
-        };
-
-        Ok(csv::ReaderBuilder::new()
-            .delimiter(b'\t')
-            .has_headers(!self.no_header)
-            .from_reader(raw_reader))
-    }
-
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
     }
 }
 
