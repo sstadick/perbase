@@ -12,8 +12,8 @@ categories = ["science"]
 keywords = ["depth", "coverage", "bioinformatics", "genomic"]
 
 [profile.release]
-#lto = "fat"
-#codegen-units = 1
+lto = "fat"
+codegen-units = 1
 
 [lib]
 name = "perbase_lib"
