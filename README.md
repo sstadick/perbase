@@ -20,7 +20,7 @@ Why `perbase` when so many other tools are out there? `perbase` leverages Rust's
 
 ```bash
 conda install -c bioconda perbase
-# or via the rust toolchain
+# or via the rust toolchain (only for v0.6.4 and under)
 cargo install perbase
 ```
 
