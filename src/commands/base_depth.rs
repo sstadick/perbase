@@ -124,9 +124,10 @@ impl BaseDepth {
 
         let receiver = par_granges_runner.process()?;
 
-        receiver
-            .into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
+        for pos in receiver.into_iter() {
+            writer.serialize(pos)?
+        }
+
         writer.flush()?;
         Ok(())
     }
@@ -196,7 +197,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
-        info!("Processing region {}(tid):{}-{}", tid, start, stop);
+        trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");

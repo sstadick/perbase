@@ -7,7 +7,7 @@ use noodles::bgzf;
 use std::{
     ffi::OsStr,
     fs::File,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     path::Path,
 };
 use termcolor::ColorChoice;
@@ -23,6 +23,18 @@ pub fn set_rayon_global_pools_size(size: usize) -> Result<()> {
         .num_threads(cpus)
         .build_global()?;
     Ok(())
+}
+
+/// Check if err is a broken pipe.
+/// Check if err is a broken pipe.
+#[inline]
+pub fn is_broken_pipe(err: &Error) -> bool {
+    if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
+        if io_err.kind() == io::ErrorKind::BrokenPipe {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check that specified `desired` is valid.

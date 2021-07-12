@@ -198,15 +198,18 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
                     let tid_end: u32 = header.target_len(tid).unwrap().try_into().unwrap();
+                    info!("Processing TID {}:0-{}", tid, tid_end);
                     // Result holds the processed positions to be sent to writer
                     let mut result = vec![];
                     for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
                         let tid_name = std::str::from_utf8(header.tid2name(tid)).unwrap();
                         let chunk_end =
                             std::cmp::min(chunk_start as u32 + serial_step_size, tid_end);
-                        info!(
+                        trace!(
                             "Batch Processing {}:{}-{}",
-                            tid_name, chunk_start, chunk_end
+                            tid_name,
+                            chunk_start,
+                            chunk_end
                         );
                         let (r, _) = rayon::join(
                             || {
@@ -222,7 +225,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                                         .collect();
                                 ivs.into_par_iter()
                                     .flat_map(|iv| {
-                                        info!("Processing {}:{}-{}", tid_name, iv.start, iv.stop);
+                                        trace!("Processing {}:{}-{}", tid_name, iv.start, iv.stop);
                                         self.processor.process_region(tid, iv.start, iv.stop)
                                     })
                                     .collect()
