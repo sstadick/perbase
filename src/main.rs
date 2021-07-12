@@ -4,6 +4,7 @@ use anyhow::Result;
 use commands::*;
 use env_logger::Env;
 use log::*;
+use perbase_lib::utils;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -35,6 +36,9 @@ impl Subcommand {
 fn main() -> Result<()> {
     env_logger::from_env(Env::default().default_filter_or("info")).init();
     if let Err(err) = Args::from_args().subcommand.run() {
+        if utils::is_broken_pipe(&err) {
+            std::process::exit(0);
+        }
         error!("{}", err);
         std::process::exit(1);
     }

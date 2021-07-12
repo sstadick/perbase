@@ -62,6 +62,7 @@ impl<F: ReadFilter> RegionProcessor for BasicProcessor<F> {
                         pileup,
                         &header,
                         &self.read_filter,
+                        None,
                     ))
                 } else {
                     None

@@ -5,8 +5,6 @@
 //! insertions / deletions at each position.
 use anyhow::Result;
 use bio::io::fasta::IndexedReader;
-use csv;
-use grep_cli::stdout;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
@@ -15,14 +13,8 @@ use perbase_lib::{
     reference, utils,
 };
 use rust_htslib::{bam, bam::Read};
-use std::{
-    convert::TryInto,
-    fs::File,
-    io::{BufWriter, Write},
-    path::PathBuf,
-};
+use std::{convert::TryInto, path::PathBuf};
 use structopt::StructOpt;
-use termcolor::ColorChoice;
 
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
@@ -46,6 +38,10 @@ pub struct BaseDepth {
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
+
+    /// Optionally bgzip the output.
+    #[structopt(long, short = "Z")]
+    bgzip: bool,
 
     /// The number of threads to use.
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
@@ -76,6 +72,11 @@ pub struct BaseDepth {
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
 
+    /// Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
+    /// quality score it will instead be counted as an `N`. If nothing is set for this no cutoff will be applied.
+    #[structopt(long, short = "Q")]
+    min_base_quality_score: Option<u8>,
+
     /// Output positions as 0-based instead of 1-based.
     #[structopt(long, short = "z")]
     zero_base: bool,
@@ -95,7 +96,7 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = self.get_writer()?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -107,6 +108,7 @@ impl BaseDepth {
             read_filter,
             self.max_depth,
             self.ref_cache_size,
+            self.min_base_quality_score,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -115,31 +117,19 @@ impl BaseDepth {
             self.bed_file.clone(),
             self.bcf_file.clone(),
             Some(cpus),
-            Some(self.chunksize.clone()),
+            Some(self.chunksize),
             Some(self.channel_size_modifier),
             base_processor,
         );
 
         let receiver = par_granges_runner.process()?;
 
-        receiver
-            .into_iter()
-            .for_each(|pos| writer.serialize(pos).unwrap());
+        for pos in receiver.into_iter() {
+            writer.serialize(pos)?
+        }
+
         writer.flush()?;
         Ok(())
-    }
-
-    /// Open a CSV Writer to a file or stdout
-    fn get_writer(&self) -> Result<csv::Writer<Box<dyn Write>>> {
-        let raw_writer: Box<dyn Write> = match &self.output {
-            Some(path) if path.to_str().unwrap() != "-" => {
-                Box::new(BufWriter::new(File::open(path)?))
-            }
-            _ => Box::new(stdout(ColorChoice::Never)),
-        };
-        Ok(csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_writer(raw_writer))
     }
 }
 
@@ -161,6 +151,8 @@ struct BaseProcessor<F: ReadFilter> {
     max_depth: u32,
     /// the cutoff at which we start logging warnings about depth being close to max depth
     max_depth_warnings_cutoff: u32,
+    /// an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
+    min_base_quality_score: Option<u8>,
 }
 
 impl<F: ReadFilter> BaseProcessor<F> {
@@ -173,15 +165,14 @@ impl<F: ReadFilter> BaseProcessor<F> {
         read_filter: F,
         max_depth: u32,
         ref_buffer_capacity: usize,
+        min_base_quality_score: Option<u8>,
     ) -> Self {
-        let ref_buffer = if let Some(ref_fasta) = &ref_fasta {
-            Some(reference::Buffer::new(
+        let ref_buffer = ref_fasta.as_ref().map(|ref_fasta| {
+            reference::Buffer::new(
                 IndexedReader::from_file(ref_fasta).expect("Reading Indexed FASTA"),
                 ref_buffer_capacity,
-            ))
-        } else {
-            None
-        };
+            )
+        });
         Self {
             reads,
             ref_fasta,
@@ -192,6 +183,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
             max_depth,
             // Set cutoff to 1% of whatever max_depth is.
             max_depth_warnings_cutoff: max_depth - (max_depth as f64 * 0.01) as u32,
+            min_base_quality_score,
         }
     }
 }
@@ -205,7 +197,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
-        info!("Processing region {}(tid):{}-{}", tid, start, stop);
+        trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -231,9 +223,19 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                 let pileup_depth = pileup.depth();
                 if pileup.pos() >= start && pileup.pos() < stop {
                     let mut pos = if self.mate_fix {
-                        PileupPosition::from_pileup_mate_aware(pileup, &header, &self.read_filter)
+                        PileupPosition::from_pileup_mate_aware(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                            self.min_base_quality_score,
+                        )
                     } else {
-                        PileupPosition::from_pileup(pileup, &header, &self.read_filter)
+                        PileupPosition::from_pileup(
+                            pileup,
+                            &header,
+                            &self.read_filter,
+                            self.min_base_quality_score,
+                        )
                     };
                     // Add the ref base if reference is available
                     if let Some(buffer) = &self.ref_buffer {
@@ -264,6 +266,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
 mod tests {
     use super::*;
     use perbase_lib::position::{pileup_position::PileupPosition, Position};
+    use proptest::bits::u8;
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use smartstring::alias::*;
@@ -358,6 +361,7 @@ mod tests {
             read_filter,
             500_000,
             cpus,
+            None,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -376,7 +380,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .for_each(|p| {
-                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
                 pos.push(p)
             });
         positions
@@ -398,6 +402,7 @@ mod tests {
             read_filter,
             500_000,
             cpus,
+            None,
         );
 
         let par_granges_runner = par_granges::ParGranges::new(
@@ -416,7 +421,89 @@ mod tests {
             .unwrap()
             .into_iter()
             .for_each(|p| {
-                let pos = positions.entry(p.ref_seq.clone()).or_insert(vec![]);
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
+                pos.push(p)
+            });
+        positions
+    }
+
+    fn non_mate_aware_positions_base_qual(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+        base_quality: u8,
+    ) -> HashMap<String, Vec<PileupPosition>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
+        let base_processor = BaseProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            1,
+            read_filter,
+            500_000,
+            cpus,
+            Some(base_quality),
+        );
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            None,
+            Some(cpus),
+            None,
+            Some(0.001),
+            base_processor,
+        );
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
+                pos.push(p)
+            });
+        positions
+    }
+
+    fn mate_aware_positions_base_qual(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+        base_quality: u8,
+    ) -> HashMap<String, Vec<PileupPosition>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
+        let base_processor = BaseProcessor::new(
+            bamfile.0.clone(),
+            None,
+            true, // mate aware
+            1,
+            read_filter,
+            500_000,
+            cpus,
+            Some(base_quality),
+        );
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            None,
+            Some(cpus),
+            None,
+            Some(0.001),
+            base_processor,
+        );
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
                 pos.push(p)
             });
         positions
@@ -426,7 +513,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_insertions(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         assert_eq!(positions.get("chr2").unwrap()[0].ins, 0);
@@ -438,7 +529,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_deletions(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         assert_eq!(positions.get("chr2").unwrap()[5].del, 0);
@@ -454,7 +549,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_refskips(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         assert_eq!(positions.get("chr2").unwrap()[11].ref_skip, 0);
@@ -470,7 +569,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_start(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         assert_eq!(positions.get("chr1").unwrap()[0].pos, 1);
@@ -490,7 +593,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_depths(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
@@ -510,7 +617,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_filters(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
         // Verify that a read that has flags saying it failed QC got filtered out
@@ -524,7 +635,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_depths_insertions(
         positions: HashMap<String, Vec<PileupPosition>>,
@@ -539,7 +654,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_depths_deletions(
         positions: HashMap<String, Vec<PileupPosition>>,
@@ -558,7 +677,11 @@ mod tests {
         positions,
         awareness_modifier,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0)
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
     )]
     fn check_depths_refskips(
         positions: HashMap<String, Vec<PileupPosition>>,
@@ -573,15 +696,30 @@ mod tests {
         assert_eq!(positions.get("chr2").unwrap()[17].depth, 4);
     }
 
+    #[rustfmt::skip]
     #[rstest(
         positions,
         awareness_modifier,
-        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1)
+        base_qual_filtered_all,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0, false),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 1, false),
+        case::mate_unaware_bq(
+            non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1),
+            0,
+            false
+        ),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 1, false),
+        case::mate_unaware_bq(
+            non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3),
+            0,
+            true
+        ),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 1, true)
     )]
     fn check_mate_detection(
         positions: HashMap<String, Vec<PileupPosition>>,
         awareness_modifier: u32,
+        base_qual_filtered_all: bool,
     ) {
         assert_eq!(positions.get("chr2").unwrap()[33].depth, 4);
         assert_eq!(
@@ -626,17 +764,30 @@ mod tests {
         ); // mate overlap
         assert_eq!(positions.get("chr2").unwrap()[44].depth, 1);
 
-        assert_eq!(positions.get("chr2").unwrap()[33].a, 4);
-        assert_eq!(positions.get("chr2").unwrap()[34].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[35].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[36].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[37].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[38].a, 4 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[39].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[40].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[41].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[42].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[43].a, 2 - awareness_modifier); // mate overlap
-        assert_eq!(positions.get("chr2").unwrap()[44].a, 1);
+        assert_eq!(positions.get("chr2").unwrap()[33].a, if base_qual_filtered_all { 0 } else { 4 } );
+        assert_eq!(positions.get("chr2").unwrap()[34].a, if base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[35].a, if base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[36].a, if base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[37].a, if base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[38].a, if base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[39].a, if base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[40].a, if base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[41].a, if base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[42].a, if base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[43].a, if base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[44].a, if base_qual_filtered_all { 0 } else { 1 });
+
+        assert_eq!(positions.get("chr2").unwrap()[33].n, if !base_qual_filtered_all { 0 } else { 4 } );
+        assert_eq!(positions.get("chr2").unwrap()[34].n, if !base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[35].n, if !base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[36].n, if !base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[37].n, if !base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[38].n, if !base_qual_filtered_all { 0 } else { 4 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[39].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[40].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[41].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[42].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[43].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
+        assert_eq!(positions.get("chr2").unwrap()[44].n, if !base_qual_filtered_all { 0 } else { 1 });
     }
 }
