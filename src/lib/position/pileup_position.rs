@@ -64,7 +64,13 @@ impl Position for PileupPosition {
 impl PileupPosition {
     /// Given a record, update the counts at this position
     #[inline(always)]
-    fn update<F: ReadFilter>(&mut self, alignment: &Alignment, record: Record, read_filter: &F) {
+    fn update<F: ReadFilter>(
+        &mut self,
+        alignment: &Alignment,
+        record: Record,
+        read_filter: &F,
+        base_filter: Option<u8>,
+    ) {
         if !read_filter.filter_read(&record) {
             self.depth -= 1;
             self.fail += 1;
@@ -79,19 +85,34 @@ impl PileupPosition {
             self.del += 1;
         } else {
             // We have an actual base!
-            match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
-                'A' => self.a += 1,
-                'C' => self.c += 1,
-                'T' => self.t += 1,
-                'G' => self.g += 1,
-                _ => self.n += 1,
+
+            // Check if we are checking the base quality score
+            if let Some(base_qual_filter) = base_filter {
+                // Check if the base quality score is greater or equal to than the cutoff
+                // TODO: When `if let` + && / || stabilizes clean this up.
+                if record.qual()[alignment.qpos().unwrap()] < base_qual_filter {
+                    self.n += 1
+                } else {
+                    match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
+                        'A' => self.a += 1,
+                        'C' => self.c += 1,
+                        'T' => self.t += 1,
+                        'G' => self.g += 1,
+                        _ => self.n += 1,
+                    }
+                }
+            } else {
+                match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
+                    'A' => self.a += 1,
+                    'C' => self.c += 1,
+                    'T' => self.t += 1,
+                    'G' => self.g += 1,
+                    _ => self.n += 1,
+                }
             }
             // Check for insertions
-            match alignment.indel() {
-                bam::pileup::Indel::Ins(_len) => {
-                    self.ins += 1;
-                }
-                _ => (),
+            if let bam::pileup::Indel::Ins(_len) = alignment.indel() {
+                self.ins += 1;
             }
         }
     }
@@ -106,11 +127,13 @@ impl PileupPosition {
     /// * `pileup` - a pileup at a genomic position
     /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    /// * `base_filter` - an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
     #[inline]
     pub fn from_pileup<F: ReadFilter>(
         pileup: Pileup,
         header: &bam::HeaderView,
         read_filter: &F,
+        base_filter: Option<u8>,
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
@@ -119,7 +142,7 @@ impl PileupPosition {
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            Self::update(&mut pos, &alignment, record, read_filter);
+            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
         }
         pos
     }
@@ -139,11 +162,13 @@ impl PileupPosition {
     /// * `pileup` - a pileup at a genomic position
     /// * `header` - a headerview for the bam file being read, to get the sequence name
     /// * `read_filter` - a function to filter out reads, returning false will cause a read to be filtered
+    /// * `base_filter` - an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
     #[inline]
     pub fn from_pileup_mate_aware<F: ReadFilter>(
         pileup: Pileup,
         header: &bam::HeaderView,
         read_filter: &F,
+        base_filter: Option<u8>,
     ) -> Self {
         let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
         // make output 1-based
@@ -188,7 +213,7 @@ impl PileupPosition {
                 .unwrap();
             // decrement depth for each read not used
             pos.depth -= total_reads - 1;
-            Self::update(&mut pos, &alignment, record, read_filter);
+            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
         }
         pos
     }

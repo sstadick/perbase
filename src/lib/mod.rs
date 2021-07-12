@@ -70,7 +70,7 @@
 //!                 // Verify that we are within the bounds of the chunk we are iterating on
 //!                 // Since pileup will pull reads that overhang edges.
 //!                 if pileup.pos() >= start && pileup.pos() < stop {
-//!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter))
+//!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter, None))
 //!                 } else {
 //!                     None
 //!                 }

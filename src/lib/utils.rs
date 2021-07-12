@@ -16,7 +16,7 @@ pub fn set_rayon_global_pools_size(size: usize) -> Result<()> {
 
 /// Check that specified `desired` is valid
 pub fn determine_allowed_cpus(desired: usize) -> Result<usize> {
-    if desired <= 0 {
+    if desired == 0 {
         error!("Must select > 0 threads");
         Err(Error::msg("Too few threads selected. Min 4"))
     } else if desired > num_cpus::get() {
