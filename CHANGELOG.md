@@ -1,3 +1,8 @@
+# 0.7.2
+
+- Update all dependencies, specifically htslib to hopefully sort out
+  openssl errors in the conda build process.
+
 # 0.7.1
 
 - Fix regression in release profile
