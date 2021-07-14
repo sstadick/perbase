@@ -835,7 +835,7 @@ dependencies = [
 [[package]]
 name = "noodles"
 version = "0.1.0"
-source = "git+https://github.com/zaeleus/noodles.git?rev=c41006c9e7945f99555157555737cd93094cf69f#c41006c9e7945f99555157555737cd93094cf69f"
+source = "git+https://github.com/zaeleus/noodles.git#a190b6539ea23ea6b929dcbfb3ffa9b1bd66d41b"
 dependencies = [
  "noodles-bgzf",
 ]
@@ -843,7 +843,7 @@ dependencies = [
 [[package]]
 name = "noodles-bgzf"
 version = "0.1.0"
-source = "git+https://github.com/zaeleus/noodles.git?rev=c41006c9e7945f99555157555737cd93094cf69f#c41006c9e7945f99555157555737cd93094cf69f"
+source = "git+https://github.com/zaeleus/noodles.git#a190b6539ea23ea6b929dcbfb3ffa9b1bd66d41b"
 dependencies = [
  "byteorder",
  "flate2",
