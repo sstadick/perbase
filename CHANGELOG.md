@@ -2,6 +2,9 @@
 
 - Update all dependencies, specifically htslib to hopefully sort out
   openssl errors in the conda build process.
+# 0.7.2
+
+- Use published version of noodles so we can publish on crates.io
 
 # 0.7.1
 

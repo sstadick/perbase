@@ -20,11 +20,9 @@ Why `perbase` when so many other tools are out there? `perbase` leverages Rust's
 
 ```bash
 conda install -c bioconda perbase
-# or via the rust toolchain (only for v0.6.4 and under)
+# OR
 cargo install perbase
 ```
-
-\* Check version, conda lags behind what you will find in the release page
 
 You can also download a binary from the [releases](https://github.com/sstadick/perbase/releases) page.
 
