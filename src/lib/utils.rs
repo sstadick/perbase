@@ -114,6 +114,7 @@ pub fn get_reader<P: AsRef<Path>>(
 pub fn get_writer<P: AsRef<Path>>(
     path: &Option<P>,
     bgzipped: bool,
+    write_headers: bool,
 ) -> Result<csv::Writer<Box<dyn Write>>> {
     let raw_writer: Box<dyn Write> = match &path {
         Some(path) if path.as_ref().to_str().unwrap() != "-" => {
@@ -135,6 +136,7 @@ pub fn get_writer<P: AsRef<Path>>(
     };
     Ok(csv::WriterBuilder::new()
         .delimiter(b'\t')
+        .has_headers(write_headers)
         .from_writer(raw_writer))
 }
 

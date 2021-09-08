@@ -40,7 +40,7 @@ impl MergeAdjacent {
                 .map(utils::is_bgzipped)
                 .unwrap_or(false),
         )?;
-        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip, true)?;
         let mut iter = reader.deserialize().map(|r| {
             let rec: BedLike = r.expect("Deserialzied record");
             rec

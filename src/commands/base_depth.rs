@@ -96,7 +96,7 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip, true)?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
