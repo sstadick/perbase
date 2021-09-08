@@ -7,7 +7,10 @@ use anyhow::Result;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{range_positions::RangePositions, Position},
+    position::{
+        range_positions::{BedFormatRangePositions, RangePositions},
+        Position,
+    },
     read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
@@ -41,6 +44,11 @@ pub struct OnlyDepth {
     /// Output path, defaults to stdout.
     #[structopt(long, short = "o")]
     output: Option<PathBuf>,
+
+    /// Output BED-like output format with the depth in the 5th column. Note, `-z` can be used with this to change coordinates to
+    /// 0-based to be more BED-like.
+    #[structopt(long)]
+    bed_format: bool,
 
     /// Optionally bgzip the output.
     #[structopt(long, short = "Z")]
@@ -92,7 +100,7 @@ impl OnlyDepth {
         info!("Running only-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(&self.output, self.bgzip)?;
+        let mut writer = utils::get_writer(&self.output, self.bgzip, !self.bed_format)?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -119,8 +127,14 @@ impl OnlyDepth {
 
         let receiver = par_granges_runner.process()?;
 
-        for pos in receiver.into_iter() {
-            writer.serialize(pos)?
+        if self.bed_format {
+            for pos in receiver.into_iter() {
+                writer.serialize(BedFormatRangePositions::from(pos))?
+            }
+        } else {
+            for pos in receiver.into_iter() {
+                writer.serialize(pos)?
+            }
         }
         writer.flush()?;
         Ok(())

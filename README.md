@@ -168,6 +168,8 @@ chr2    79      84      2
 chr2    84      89      1
 ```
 
+If a BED-like output is needed, `--bed-format -z` flags can be set, which will write a 0-based, no-header TSV output with an empty 4th column and the depth in the 5th column.
+
 Usage:
 
 ```text
@@ -177,13 +179,15 @@ USAGE:
     perbase only-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-    -Z, --bgzip        Optionally bgzip the output
-    -x, --fast-mode    Calculate depth based only on read starts/stops, see docs for full details
-    -h, --help         Prints help information
-    -m, --mate-fix     Fix overlapping mates counts, see docs for full details
-    -n, --no-merge     Skip merging adjacent bases that have the same depth
-    -V, --version      Prints version information
-    -z, --zero-base    Output positions as 0-based instead of 1-based
+        --bed-format    Output BED-like output format with the depth in the 5th column. Note, `-z` can be used with this
+                        to change coordinates to 0-based to be more BED-like
+    -Z, --bgzip         Optionally bgzip the output
+    -x, --fast-mode     Calculate depth based only on read starts/stops, see docs for full details
+    -h, --help          Prints help information
+    -m, --mate-fix      Fix overlapping mates counts, see docs for full details
+    -n, --no-merge      Skip merging adjacent bases that have the same depth
+    -V, --version       Prints version information
+    -z, --zero-base     Output positions as 0-based instead of 1-based
 
 OPTIONS:
     -B, --bcf-file <bcf-file>
@@ -204,7 +208,7 @@ OPTIONS:
     -q, --min-mapq <min-mapq>                              Minimum MAPQ for a read to count toward depth [default: 0]
     -o, --output <output>                                  Output path, defaults to stdout
     -r, --ref-fasta <ref-fasta>                            Indexed reference fasta, set if using CRAM
-    -t, --threads <threads>                                The number of threads to use [default: 32]
+    -t, --threads <threads>                                The number of threads to use [default: 16]
 
 ARGS:
     <reads>    Input indexed BAM/CRAM to analyze

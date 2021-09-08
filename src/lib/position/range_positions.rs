@@ -31,3 +31,31 @@ impl Position for RangePositions {
         }
     }
 }
+
+/// Bed-like formatting of [`RangePositions`]
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BedFormatRangePositions {
+    /// Reference sequence name.
+    pub chrom: String,
+    /// 1-based position in the sequence.
+    pub chrom_start: u32,
+    /// The point at which this depth ends, non-inclusive
+    pub chrom_end: u32,
+    /// The name column of the bed file
+    pub name: String,
+    /// Total depth at this position.
+    pub score: u32,
+}
+
+impl From<RangePositions> for BedFormatRangePositions {
+    fn from(orig: RangePositions) -> Self {
+        BedFormatRangePositions {
+            chrom: orig.ref_seq,
+            chrom_start: orig.pos,
+            chrom_end: orig.end,
+            name: String::from(""),
+            score: orig.depth,
+        }
+    }
+}
