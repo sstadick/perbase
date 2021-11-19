@@ -269,20 +269,19 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
 
         if self.keep_zeros {
             let mut new_result = vec![];
+            let name = PileupPosition::compact_refseq(&header, tid);
+            let mut pos = start;
             if let Some(position) = result.get(0) {
-                let mut pos = start;
-                while position.pos > pos {
-                    let name = PileupPosition::compact_refseq(&header, tid);
-                    new_result.push(PileupPosition::new(name, pos + self.coord_base));
+                while pos < (position.pos - self.coord_base) {
+                    new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
                     pos += 1;
                 }
                 pos += result.len() as u32;
                 new_result.extend(result.into_iter());
-                while pos < stop {
-                    let name = PileupPosition::compact_refseq(&header, tid);
-                    new_result.push(PileupPosition::new(name, pos + self.coord_base));
-                    pos += 1;
-                }
+            }
+            while pos < stop {
+                new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                pos += 1;
             }
             new_result
         } else {
