@@ -86,6 +86,13 @@ pub struct OnlyDepth {
     #[structopt(long, short = "n")]
     no_merge: bool,
 
+    /// Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+    ///
+    /// **NOTE** If this is set it could result in duplicate output entries for regions that overlap.
+    /// **NOTE** This may cause issues with downstream tooling.
+    #[structopt(long, short = "M")]
+    skip_merging_intervals: bool,
+
     /// Keep positions even if they have 0 depth.
     #[structopt(long, short = "k")]
     keep_zeros: bool,
@@ -124,6 +131,7 @@ impl OnlyDepth {
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.bcf_file.clone(),
+            !self.skip_merging_intervals,
             Some(cpus),
             Some(self.chunksize.clone()),
             Some(self.channel_size_modifier),
@@ -653,6 +661,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -693,6 +702,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -733,6 +743,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -773,6 +784,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -813,6 +825,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),

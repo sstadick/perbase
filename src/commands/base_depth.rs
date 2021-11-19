@@ -72,6 +72,13 @@ pub struct BaseDepth {
     #[structopt(long, short = "k")]
     keep_zeros: bool,
 
+    /// Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+    ///
+    /// **NOTE** If this is set it could result in duplicate output entries for regions that overlap.
+    /// **NOTE** This may cause issues with downstream tooling.
+    #[structopt(long, short = "M")]
+    skip_merging_intervals: bool,
+
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
@@ -121,6 +128,7 @@ impl BaseDepth {
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.bcf_file.clone(),
+            !self.skip_merging_intervals,
             Some(cpus),
             Some(self.chunksize),
             Some(self.channel_size_modifier),
@@ -399,6 +407,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -441,6 +450,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -483,6 +493,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -525,6 +536,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),

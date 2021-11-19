@@ -93,6 +93,7 @@ fn main() -> Result<()> {
         None,                                 // optional ref fasta
         None, // optional bcf/vcf file to specify positions of interest
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
+        true, // Merge any overlapping regions in the BED file
         None, // optional allowed number of threads, defaults to max
         None, // optional chunksize modification
         None, // optional modifier on the size of the channel for sending Positions
