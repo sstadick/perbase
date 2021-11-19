@@ -8,7 +8,7 @@ use bio::io::fasta::IndexedReader;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::pileup_position::PileupPosition,
+    position::{pileup_position::PileupPosition, Position},
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
@@ -68,6 +68,10 @@ pub struct BaseDepth {
     #[structopt(long, short = "m")]
     mate_fix: bool,
 
+    /// Keep positions even if they have 0 depth.
+    #[structopt(long, short = "k")]
+    keep_zeros: bool,
+
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
@@ -104,6 +108,7 @@ impl BaseDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
+            self.keep_zeros,
             if self.zero_base { 0 } else { 1 },
             read_filter,
             self.max_depth,
@@ -143,6 +148,8 @@ struct BaseProcessor<F: ReadFilter> {
     ref_buffer: Option<reference::Buffer>,
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
+    /// Indicate whether or not to keep postitions that have zero depth
+    keep_zeros: bool,
     /// 0-based or 1-based coordiante output
     coord_base: u32,
     /// implementation of [position::ReadFilter] that will be used
@@ -161,6 +168,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         mate_fix: bool,
+        keep_zeros: bool,
         coord_base: u32,
         read_filter: F,
         max_depth: u32,
@@ -178,6 +186,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
             ref_fasta,
             ref_buffer,
             mate_fix,
+            keep_zeros,
             coord_base,
             read_filter,
             max_depth,
@@ -257,7 +266,28 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                 }
             })
             .collect();
-        result
+
+        if self.keep_zeros {
+            let mut new_result = vec![];
+            if let Some(position) = result.get(0) {
+                let mut pos = start;
+                while position.pos > pos {
+                    let name = PileupPosition::compact_refseq(&header, tid);
+                    new_result.push(PileupPosition::new(name, pos + self.coord_base));
+                    pos += 1;
+                }
+                pos += result.len() as u32;
+                new_result.extend(result.into_iter());
+                while pos < stop {
+                    let name = PileupPosition::compact_refseq(&header, tid);
+                    new_result.push(PileupPosition::new(name, pos + self.coord_base));
+                    pos += 1;
+                }
+            }
+            new_result
+        } else {
+            result
+        }
     }
 }
 
@@ -357,6 +387,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            false,
             1,
             read_filter,
             500_000,
@@ -398,6 +429,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            false,
             1,
             read_filter,
             500_000,
@@ -438,6 +470,7 @@ mod tests {
         let base_processor = BaseProcessor::new(
             bamfile.0.clone(),
             None,
+            false,
             false,
             1,
             read_filter,
@@ -480,6 +513,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            false,
             1,
             read_filter,
             500_000,
