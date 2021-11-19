@@ -86,6 +86,10 @@ pub struct OnlyDepth {
     #[structopt(long, short = "n")]
     no_merge: bool,
 
+    /// Keep positions even if they have 0 depth.
+    #[structopt(long, short = "k")]
+    keep_zeros: bool,
+
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
@@ -110,6 +114,7 @@ impl OnlyDepth {
             self.mate_fix,
             self.fast_mode,
             self.no_merge,
+            self.keep_zeros,
             if self.zero_base { 0 } else { 1 },
             read_filter,
         );
@@ -168,6 +173,8 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     fast_mode: bool,
     /// Indicate whether or not to merge adjacent positions that have the same depth
     no_merge: bool,
+    /// Indicate whether or not to keep positions with 0 depth
+    keep_zeros: bool,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
     /// 0-based or 1-based coordinate output
@@ -182,6 +189,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         mate_fix: bool,
         fast_mode: bool,
         no_merge: bool,
+        keep_zeros: bool,
         coord_base: u32,
         read_filter: F,
     ) -> Self {
@@ -191,6 +199,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             fast_mode,
             mate_fix,
             no_merge,
+            keep_zeros,
             coord_base,
             read_filter,
         }
@@ -210,7 +219,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             let mut results = vec![];
             for (i, count) in counter.iter().enumerate() {
                 sum += count;
-                if sum != 0 {
+                if sum != 0 && !self.keep_zeros {
                     let mut pos = RangePositions::new(
                         String::from(contig),
                         region_start + i as u32 + self.coord_base,
@@ -634,6 +643,7 @@ mod tests {
             mate_fix,
             fast_mode,
             false,
+            false,
             0,
             read_filter,
         );
@@ -667,8 +677,16 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            false,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
@@ -699,8 +717,16 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            true,
+            false,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
@@ -731,8 +757,16 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            true,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
@@ -763,8 +797,16 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            true,
+            true,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
