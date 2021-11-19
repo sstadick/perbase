@@ -1,7 +1,7 @@
 //! # ParGranges
 //!
 //! Iterates over chunked genomic regions in parallel.
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use bio::io::bed;
 use crossbeam::channel::{bounded, Receiver};
 use lazy_static::lazy_static;
@@ -282,14 +282,25 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     ) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];
-        for record in bed_reader.records() {
+        for (i, record) in bed_reader.records().enumerate() {
             let record = record?;
             let tid = header
                 .tid(record.chrom().as_bytes())
                 .expect("Chromosome not found in BAM/CRAM header");
+            let start = record
+                .start()
+                .try_into()
+                .with_context(|| format!("BED record {} is invalid: unable to parse start", i))?;
+            let stop = record
+                .end()
+                .try_into()
+                .with_context(|| format!("BED record {} is invalid: unable to parse stop", i))?;
+            if stop < start {
+                return Err(anyhow!("BED record {} is invalid: stop < start", i));
+            }
             intervals[tid as usize].push(Interval {
-                start: record.start().try_into().unwrap(),
-                stop: record.end().try_into().unwrap(),
+                start,
+                stop,
                 val: (),
             });
         }
