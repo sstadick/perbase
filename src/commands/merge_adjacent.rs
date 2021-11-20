@@ -22,7 +22,7 @@ pub struct MergeAdjacent {
     compression_threads: usize,
 
     /// The level to use for compressing output (specified by --bgzip)
-    #[structopt(long, short = "T", default_value = "2")]
+    #[structopt(long, short = "L", default_value = "2")]
     compression_level: u32,
 
     /// Indicate if the input file does not have a header

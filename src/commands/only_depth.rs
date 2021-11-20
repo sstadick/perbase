@@ -59,11 +59,11 @@ pub struct OnlyDepth {
     threads: usize,
 
     /// The number of threads to use for compressing output (specified by --bgzip)
-    #[structopt(long, short = "t", default_value = "4")]
+    #[structopt(long, short = "T", default_value = "4")]
     compression_threads: usize,
 
     /// The level to use for compressing output (specified by --bgzip)
-    #[structopt(long, short = "T", default_value = "2")]
+    #[structopt(long, short = "L", default_value = "2")]
     compression_level: u32,
 
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
