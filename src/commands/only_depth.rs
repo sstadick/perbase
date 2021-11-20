@@ -58,6 +58,14 @@ pub struct OnlyDepth {
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
     threads: usize,
 
+    /// The number of threads to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "t", default_value = "4")]
+    compression_threads: usize,
+
+    /// The level to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "T", default_value = "2")]
+    compression_level: u32,
+
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
@@ -111,7 +119,13 @@ impl OnlyDepth {
         info!("Running only-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(&self.output, self.bgzip, !self.bed_format)?;
+        let mut writer = utils::get_writer(
+            &self.output,
+            self.bgzip,
+            !self.bed_format,
+            self.compression_threads,
+            self.compression_level,
+        )?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -622,13 +636,13 @@ mod tests {
 
         // Update the test/test.bam file
         let mut writer =
-            bam::Writer::from_path(&path, &header, bam::Format::BAM).expect("Created writer");
+            bam::Writer::from_path(&path, &header, bam::Format::Bam).expect("Created writer");
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
                       // build the index
-        bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
         (path, tempdir)
     }
 

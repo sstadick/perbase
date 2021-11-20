@@ -452,9 +452,9 @@ mod test {
                 chr_rec.push_tag(b"LN", &chr.2.to_string()); // set len as max observed
                 header.push_record(&chr_rec);
             }
-            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::BAM).expect("Opened test.bam for writing");
+            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam).expect("Opened test.bam for writing");
             drop(writer); // force flush the writer so the header info is written
-            bam::index::build(&bam_path, None, bam::index::Type::BAI, 1).unwrap();
+            bam::index::build(&bam_path, None, bam::index::Type::Bai, 1).unwrap();
 
             // Build a bed
             let mut writer = bed::Writer::to_file(&bed_path).expect("Opened test.bed for writing");
@@ -476,7 +476,7 @@ mod test {
             for (i,chr) in chromosomes.iter().enumerate() {
                 header.push_record(format!("##contig=<ID={},length={}>", &i.to_string(), &chr.2.to_string()).as_bytes());
             }
-            let mut writer = bcf::Writer::from_path(&vcf_path, &header, true, bcf::Format::VCF).expect("Failed to open test.vcf for writing");
+            let mut writer = bcf::Writer::from_path(&vcf_path, &header, true, bcf::Format::Vcf).expect("Failed to open test.vcf for writing");
             let mut record = writer.empty_record();
             for (i, chr) in chromosomes.iter().enumerate() {
                 record.set_rid(Some(i as u32));

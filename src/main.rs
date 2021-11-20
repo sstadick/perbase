@@ -34,7 +34,7 @@ impl Subcommand {
 }
 
 fn main() -> Result<()> {
-    env_logger::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     if let Err(err) = Args::from_args().subcommand.run() {
         if utils::is_broken_pipe(&err) {
             std::process::exit(0);
