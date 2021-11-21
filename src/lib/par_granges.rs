@@ -1,7 +1,7 @@
 //! # ParGranges
 //!
 //! Iterates over chunked genomic regions in parallel.
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use bio::io::bed;
 use crossbeam::channel::{bounded, Receiver};
 use lazy_static::lazy_static;
@@ -61,6 +61,8 @@ pub struct ParGranges<R: 'static + RegionProcessor + Send + Sync> {
     regions_bed: Option<PathBuf>,
     /// Optional path to a BCF/VCF file to restrict the regions iterated over
     regions_bcf: Option<PathBuf>,
+    /// If `regions_bed` and or `regions_bcf` is specified, and this is true, merge any overlapping regions to avoid duplicate output.
+    merge_regions: bool,
     /// Number of threads this is allowed to use, uses all if None
     threads: usize,
     /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
@@ -82,6 +84,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `ref_fasta`- path to an indexed reference file for CRAM
     /// * `regions_bed`- Optional BED file path restricting the regions to be examined
     /// * `regions_bcf`- Optional BCF/VCF file path restricting the regions to be examined
+    /// * `merge_regions` - If `regions_bed` and or `regions_bcf` is specified, and this is true, merge any overlapping regions to avoid duplicate output.
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
     ///                each worker will get to work on at one time.
@@ -93,6 +96,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         ref_fasta: Option<PathBuf>,
         regions_bed: Option<PathBuf>,
         regions_bcf: Option<PathBuf>,
+        merge_regions: bool,
         threads: Option<usize>,
         chunksize: Option<u32>,
         channel_size_modifier: Option<f64>,
@@ -117,6 +121,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             ref_fasta,
             regions_bed,
             regions_bcf,
+            merge_regions,
             threads,
             chunksize: chunksize.unwrap_or(CHUNKSIZE),
             channel_size_modifier: channel_size_modifier.unwrap_or(CHANNEL_SIZE_MODIFIER),
@@ -162,7 +167,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 // Work out if we are restricted to a subset of sites
                 let bed_intervals = if let Some(regions_bed) = &self.regions_bed {
                     Some(
-                        Self::bed_to_intervals(&header, regions_bed)
+                        Self::bed_to_intervals(&header, regions_bed, self.merge_regions)
                             .expect("Parsed BED to intervals"),
                     )
                 } else {
@@ -170,14 +175,16 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 };
                 let bcf_intervals = if let Some(regions_bcf) = &self.regions_bcf {
                     Some(
-                        Self::bcf_to_intervals(&header, regions_bcf)
+                        Self::bcf_to_intervals(&header, regions_bcf, self.merge_regions)
                             .expect("Parsed BCF/VCF to intervals"),
                     )
                 } else {
                     None
                 };
                 let restricted_ivs = match (bed_intervals, bcf_intervals) {
-                    (Some(bed_ivs), Some(bcf_ivs)) => Some(Self::merge_intervals(bed_ivs, bcf_ivs)),
+                    (Some(bed_ivs), Some(bcf_ivs)) => {
+                        Some(Self::merge_intervals(bed_ivs, bcf_ivs, self.merge_regions))
+                    }
                     (Some(bed_ivs), None) => Some(bed_ivs),
                     (None, Some(bcf_ivs)) => Some(bcf_ivs),
                     (None, None) => None,
@@ -266,18 +273,34 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     }
 
     /// Read a bed file into a vector of lappers with the index representing the TID
+    /// if `merge' is true then any overlapping intervals in the sets will be merged.
     // TODO add a proper error message
-    fn bed_to_intervals(header: &HeaderView, bed_file: &PathBuf) -> Result<Vec<Lapper<u32, ()>>> {
+    fn bed_to_intervals(
+        header: &HeaderView,
+        bed_file: &PathBuf,
+        merge: bool,
+    ) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bed_reader = bed::Reader::from_file(bed_file)?;
         let mut intervals = vec![vec![]; header.target_count() as usize];
-        for record in bed_reader.records() {
+        for (i, record) in bed_reader.records().enumerate() {
             let record = record?;
             let tid = header
                 .tid(record.chrom().as_bytes())
                 .expect("Chromosome not found in BAM/CRAM header");
+            let start = record
+                .start()
+                .try_into()
+                .with_context(|| format!("BED record {} is invalid: unable to parse start", i))?;
+            let stop = record
+                .end()
+                .try_into()
+                .with_context(|| format!("BED record {} is invalid: unable to parse stop", i))?;
+            if stop < start {
+                return Err(anyhow!("BED record {} is invalid: stop < start", i));
+            }
             intervals[tid as usize].push(Interval {
-                start: record.start().try_into().unwrap(),
-                stop: record.end().try_into().unwrap(),
+                start,
+                stop,
                 val: (),
             });
         }
@@ -286,14 +309,21 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             .into_iter()
             .map(|ivs| {
                 let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
+                if merge {
+                    lapper.merge_overlaps();
+                }
                 lapper
             })
             .collect())
     }
 
     /// Read a BCF/VCF file into a vector of lappers with index representing the TID
-    fn bcf_to_intervals(header: &HeaderView, bcf_file: &PathBuf) -> Result<Vec<Lapper<u32, ()>>> {
+    /// if `merge' is true then any overlapping intervals in the sets will be merged.
+    fn bcf_to_intervals(
+        header: &HeaderView,
+        bcf_file: &PathBuf,
+        merge: bool,
+    ) -> Result<Vec<Lapper<u32, ()>>> {
         let mut bcf_reader = Reader::from_path(bcf_file).expect("Error opening BCF/VCF file.");
         let bcf_header_reader = Reader::from_path(bcf_file).expect("Error opening BCF/VCF file.");
         let bcf_header = bcf_header_reader.header();
@@ -320,16 +350,20 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             .into_iter()
             .map(|ivs| {
                 let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
+                if merge {
+                    lapper.merge_overlaps();
+                }
                 lapper
             })
             .collect())
     }
 
     /// Merge two sets of restriction intervals together
+    /// if `merge' is true then any overlapping intervals in the sets will be merged.
     fn merge_intervals(
         a_ivs: Vec<Lapper<u32, ()>>,
         b_ivs: Vec<Lapper<u32, ()>>,
+        merge: bool,
     ) -> Vec<Lapper<u32, ()>> {
         let mut intervals = vec![vec![]; a_ivs.len()];
         for (i, (a_lapper, b_lapper)) in a_ivs.into_iter().zip(b_ivs.into_iter()).enumerate() {
@@ -339,7 +373,9 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             .into_iter()
             .map(|ivs| {
                 let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
+                if merge {
+                    lapper.merge_overlaps();
+                }
                 lapper
             })
             .collect()
@@ -416,9 +452,9 @@ mod test {
                 chr_rec.push_tag(b"LN", &chr.2.to_string()); // set len as max observed
                 header.push_record(&chr_rec);
             }
-            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::BAM).expect("Opened test.bam for writing");
+            let writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam).expect("Opened test.bam for writing");
             drop(writer); // force flush the writer so the header info is written
-            bam::index::build(&bam_path, None, bam::index::Type::BAI, 1).unwrap();
+            bam::index::build(&bam_path, None, bam::index::Type::Bai, 1).unwrap();
 
             // Build a bed
             let mut writer = bed::Writer::to_file(&bed_path).expect("Opened test.bed for writing");
@@ -440,7 +476,7 @@ mod test {
             for (i,chr) in chromosomes.iter().enumerate() {
                 header.push_record(format!("##contig=<ID={},length={}>", &i.to_string(), &chr.2.to_string()).as_bytes());
             }
-            let mut writer = bcf::Writer::from_path(&vcf_path, &header, true, bcf::Format::VCF).expect("Failed to open test.vcf for writing");
+            let mut writer = bcf::Writer::from_path(&vcf_path, &header, true, bcf::Format::Vcf).expect("Failed to open test.vcf for writing");
             let mut record = writer.empty_record();
             for (i, chr) in chromosomes.iter().enumerate() {
                 record.set_rid(Some(i as u32));
@@ -464,6 +500,7 @@ mod test {
                 None,
                 if use_bed { Some(bed_path) } else { None }, // do one with regions
                 if use_vcf { Some(vcf_path) } else { None }, // do one with vcf regions
+                true,
                 Some(cpus),
                 Some(chunksize),
                 Some(0.002),

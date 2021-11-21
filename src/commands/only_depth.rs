@@ -58,6 +58,14 @@ pub struct OnlyDepth {
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
     threads: usize,
 
+    /// The number of threads to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "T", default_value = "4")]
+    compression_threads: usize,
+
+    /// The level to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "L", default_value = "2")]
+    compression_level: u32,
+
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
@@ -86,6 +94,17 @@ pub struct OnlyDepth {
     #[structopt(long, short = "n")]
     no_merge: bool,
 
+    /// Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+    ///
+    /// **NOTE** If this is set it could result in duplicate output entries for regions that overlap.
+    /// **NOTE** This may cause issues with downstream tooling.
+    #[structopt(long, short = "M")]
+    skip_merging_intervals: bool,
+
+    /// Keep positions even if they have 0 depth.
+    #[structopt(long, short = "k")]
+    keep_zeros: bool,
+
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
     min_mapq: u8,
@@ -100,7 +119,13 @@ impl OnlyDepth {
         info!("Running only-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(&self.output, self.bgzip, !self.bed_format)?;
+        let mut writer = utils::get_writer(
+            &self.output,
+            self.bgzip,
+            !self.bed_format,
+            self.compression_threads,
+            self.compression_level,
+        )?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -110,6 +135,7 @@ impl OnlyDepth {
             self.mate_fix,
             self.fast_mode,
             self.no_merge,
+            self.keep_zeros,
             if self.zero_base { 0 } else { 1 },
             read_filter,
         );
@@ -119,6 +145,7 @@ impl OnlyDepth {
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.bcf_file.clone(),
+            !self.skip_merging_intervals,
             Some(cpus),
             Some(self.chunksize.clone()),
             Some(self.channel_size_modifier),
@@ -168,6 +195,8 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     fast_mode: bool,
     /// Indicate whether or not to merge adjacent positions that have the same depth
     no_merge: bool,
+    /// Indicate whether or not to keep positions with 0 depth
+    keep_zeros: bool,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
     /// 0-based or 1-based coordinate output
@@ -182,6 +211,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         mate_fix: bool,
         fast_mode: bool,
         no_merge: bool,
+        keep_zeros: bool,
         coord_base: u32,
         read_filter: F,
     ) -> Self {
@@ -191,6 +221,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             fast_mode,
             mate_fix,
             no_merge,
+            keep_zeros,
             coord_base,
             read_filter,
         }
@@ -210,7 +241,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             let mut results = vec![];
             for (i, count) in counter.iter().enumerate() {
                 sum += count;
-                if sum != 0 {
+                if sum != 0 && !self.keep_zeros {
                     let mut pos = RangePositions::new(
                         String::from(contig),
                         region_start + i as u32 + self.coord_base,
@@ -605,13 +636,13 @@ mod tests {
 
         // Update the test/test.bam file
         let mut writer =
-            bam::Writer::from_path(&path, &header, bam::Format::BAM).expect("Created writer");
+            bam::Writer::from_path(&path, &header, bam::Format::Bam).expect("Created writer");
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
                       // build the index
-        bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
         (path, tempdir)
     }
 
@@ -634,6 +665,7 @@ mod tests {
             mate_fix,
             fast_mode,
             false,
+            false,
             0,
             read_filter,
         );
@@ -643,6 +675,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -667,14 +700,23 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, false, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            false,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -699,14 +741,23 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, false, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            true,
+            false,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
             None,
             None,
+            true,
             Some(cpus),
             Some(1_000_000),
             Some(0.001),
@@ -731,14 +782,23 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, false, true, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            true,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -763,14 +823,23 @@ mod tests {
     ) -> HashMap<String, Vec<RangePositions>> {
         let cpus = utils::determine_allowed_cpus(8).unwrap();
 
-        let onlydepth_processor =
-            OnlyDepthProcessor::new(bamfile.0.clone(), None, true, true, false, 0, read_filter);
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bamfile.0.clone(),
+            None,
+            true,
+            true,
+            false,
+            false,
+            0,
+            read_filter,
+        );
 
         let par_granges_runner = par_granges::ParGranges::new(
             bamfile.0,
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),

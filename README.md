@@ -93,11 +93,29 @@ USAGE:
     perbase base-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-    -Z, --bgzip        Optionally bgzip the output
-    -h, --help         Prints help information
-    -m, --mate-fix     Fix overlapping mates counts, see docs for full details
-    -V, --version      Prints version information
-    -z, --zero-base    Output positions as 0-based instead of 1-based
+    -Z, --bgzip                     
+            Optionally bgzip the output
+
+    -h, --help                      
+            Prints help information
+
+    -k, --keep-zeros                
+            Keep positions even if they have 0 depth
+
+    -m, --mate-fix                  
+            Fix overlapping mates counts, see docs for full details
+
+    -M, --skip-merging-intervals    
+            Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+            
+            **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
+            may cause issues with downstream tooling.
+    -V, --version                   
+            Prints version information
+
+    -z, --zero-base                 
+            Output positions as 0-based instead of 1-based
+
 
 OPTIONS:
     -B, --bcf-file <bcf-file>
@@ -112,24 +130,43 @@ OPTIONS:
     -c, --chunksize <chunksize>
             The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) *
             chunksize [default: 1000000]
-    -F, --exclude-flags <exclude-flags>                      SAM flags to exclude, recommended 3848 [default: 0]
-    -f, --include-flags <include-flags>                      SAM flags to include [default: 0]
+    -L, --compression-level <compression-level>
+            The level to use for compressing output (specified by --bgzip) [default: 2]
+
+    -T, --compression-threads <compression-threads>
+            The number of threads to use for compressing output (specified by --bgzip) [default: 4]
+
+    -F, --exclude-flags <exclude-flags>                      
+            SAM flags to exclude, recommended 3848 [default: 0]
+
+    -f, --include-flags <include-flags>                      
+            SAM flags to include [default: 0]
+
     -D, --max-depth <max-depth>
             Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH` output
             field will be set to true and that position should be viewed as suspect [default: 100000]
     -Q, --min-base-quality-score <min-base-quality-score>
             Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
             quality score it will instead be counted as an `N`. If nothing is set for this no cutoff will be applied
-    -q, --min-mapq <min-mapq>                                Minimum MAPQ for a read to count toward depth [default: 0]
-    -o, --output <output>                                    Output path, defaults to stdout
+    -q, --min-mapq <min-mapq>                                
+            Minimum MAPQ for a read to count toward depth [default: 0]
+
+    -o, --output <output>                                    
+            Output path, defaults to stdout
+
         --ref-cache-size <ref-cache-size>
             Number of Reference Sequences to hold in memory at one time. Smaller will decrease mem usage [default: 10]
 
-    -r, --ref-fasta <ref-fasta>                              Indexed reference fasta, set if using CRAM
-    -t, --threads <threads>                                  The number of threads to use [default: 32]
+    -r, --ref-fasta <ref-fasta>                              
+            Indexed reference fasta, set if using CRAM
+
+    -t, --threads <threads>                                  
+            The number of threads to use [default: 32]
+
 
 ARGS:
-    <reads>    Input indexed BAM/CRAM to analyze
+    <reads>    
+            Input indexed BAM/CRAM to analyze
 ```
 
 ### only-depth
@@ -179,15 +216,38 @@ USAGE:
     perbase only-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-        --bed-format    Output BED-like output format with the depth in the 5th column. Note, `-z` can be used with this
-                        to change coordinates to 0-based to be more BED-like
-    -Z, --bgzip         Optionally bgzip the output
-    -x, --fast-mode     Calculate depth based only on read starts/stops, see docs for full details
-    -h, --help          Prints help information
-    -m, --mate-fix      Fix overlapping mates counts, see docs for full details
-    -n, --no-merge      Skip merging adjacent bases that have the same depth
-    -V, --version       Prints version information
-    -z, --zero-base     Output positions as 0-based instead of 1-based
+        --bed-format                
+            Output BED-like output format with the depth in the 5th column. Note, `-z` can be used with this to change
+            coordinates to 0-based to be more BED-like
+    -Z, --bgzip                     
+            Optionally bgzip the output
+
+    -x, --fast-mode                 
+            Calculate depth based only on read starts/stops, see docs for full details
+
+    -h, --help                      
+            Prints help information
+
+    -k, --keep-zeros                
+            Keep positions even if they have 0 depth
+
+    -m, --mate-fix                  
+            Fix overlapping mates counts, see docs for full details
+
+    -n, --no-merge                  
+            Skip merging adjacent bases that have the same depth
+
+    -M, --skip-merging-intervals    
+            Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+            
+            **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
+            may cause issues with downstream tooling.
+    -V, --version                   
+            Prints version information
+
+    -z, --zero-base                 
+            Output positions as 0-based instead of 1-based
+
 
 OPTIONS:
     -B, --bcf-file <bcf-file>
@@ -203,15 +263,34 @@ OPTIONS:
     -c, --chunksize <chunksize>
             The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) *
             chunksize [default: 1000000]
-    -F, --exclude-flags <exclude-flags>                    SAM flags to exclude, recommended 3848 [default: 0]
-    -f, --include-flags <include-flags>                    SAM flags to include [default: 0]
-    -q, --min-mapq <min-mapq>                              Minimum MAPQ for a read to count toward depth [default: 0]
-    -o, --output <output>                                  Output path, defaults to stdout
-    -r, --ref-fasta <ref-fasta>                            Indexed reference fasta, set if using CRAM
-    -t, --threads <threads>                                The number of threads to use [default: 16]
+    -L, --compression-level <compression-level>
+            The level to use for compressing output (specified by --bgzip) [default: 2]
+
+    -T, --compression-threads <compression-threads>
+            The number of threads to use for compressing output (specified by --bgzip) [default: 4]
+
+    -F, --exclude-flags <exclude-flags>                    
+            SAM flags to exclude, recommended 3848 [default: 0]
+
+    -f, --include-flags <include-flags>                    
+            SAM flags to include [default: 0]
+
+    -q, --min-mapq <min-mapq>                              
+            Minimum MAPQ for a read to count toward depth [default: 0]
+
+    -o, --output <output>                                  
+            Output path, defaults to stdout
+
+    -r, --ref-fasta <ref-fasta>                            
+            Indexed reference fasta, set if using CRAM
+
+    -t, --threads <threads>                                
+            The number of threads to use [default: 32]
+
 
 ARGS:
-    <reads>    Input indexed BAM/CRAM to analyze
+    <reads>    
+            Input indexed BAM/CRAM to analyze
 ```
 
 ## merge-adjacent
@@ -233,6 +312,8 @@ Or it can take files with three columns with headers that are like
 The `END|chromEnd` column is optional.
 
 ```text
+perbase-merge-adjacent 0.7.5-alpha.0
+Seth Stadick <sstadick@gmail.com>
 Merge adjacent intervals that have the same depth. Input must be sorted like: `sort -k1,1 -k2,2n in.bed > in.sorted.bed`
 
 Generally accepts any file with no header tha is <chrom>\t<start>\t<stop>\t<depth>. The <stop> is optional. See
@@ -242,16 +323,33 @@ USAGE:
     perbase merge-adjacent [FLAGS] [OPTIONS] [in-file]
 
 FLAGS:
-    -Z, --bgzip        Optionally bgzip the output
-    -h, --help         Prints help information
-    -n, --no-header    Indicate if the input file does not have a header
-    -V, --version      Prints version information
+    -Z, --bgzip        
+            Optionally bgzip the output
+
+    -h, --help         
+            Prints help information
+
+    -n, --no-header    
+            Indicate if the input file does not have a header
+
+    -V, --version      
+            Prints version information
+
 
 OPTIONS:
-    -o, --output <output>    The output location, defaults to STDOUT
+    -T, --compression-level <compression-level>
+            The level to use for compressing output (specified by --bgzip) [default: 2]
+
+    -T, --compression-threads <compression-threads>
+            The number of threads to use for compressing output (specified by --bgzip) [default: 32]
+
+    -o, --output <output>                              
+            The output location, defaults to STDOUT
+
 
 ARGS:
-    <in-file>    Input bed-like file, defaults to STDIN
+    <in-file>    
+            Input bed-like file, defaults to STDIN
 ```
 
 EX:

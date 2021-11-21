@@ -6,9 +6,10 @@ use rust_htslib::bam::{
     self,
     pileup::{Alignment, Pileup},
     record::Record,
+    HeaderView,
 };
 use serde::Serialize;
-use smartstring::alias::String;
+use smartstring::{alias::String, LazyCompact, SmartString};
 use std::{cmp::Ordering, default};
 
 /// Hold all information about a position.
@@ -135,9 +136,9 @@ impl PileupPosition {
         read_filter: &F,
         base_filter: Option<u8>,
     ) -> Self {
-        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
+        let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
-        let mut pos = Self::new(String::from(name), pileup.pos());
+        let mut pos = Self::new(name, pileup.pos());
         pos.depth = pileup.depth();
 
         for alignment in pileup.alignments() {
@@ -170,9 +171,9 @@ impl PileupPosition {
         read_filter: &F,
         base_filter: Option<u8>,
     ) -> Self {
-        let name = std::str::from_utf8(header.tid2name(pileup.tid())).unwrap();
+        let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
-        let mut pos = Self::new(String::from(name), pileup.pos());
+        let mut pos = Self::new(name, pileup.pos());
         pos.depth = pileup.depth();
 
         // Group records by qname
@@ -216,5 +217,12 @@ impl PileupPosition {
             Self::update(&mut pos, &alignment, record, read_filter, base_filter);
         }
         pos
+    }
+
+    /// Convert a tid to a [`SmartString<LazyCompact>`].
+    #[inline]
+    pub fn compact_refseq(header: &HeaderView, tid: u32) -> SmartString<LazyCompact> {
+        let name = std::str::from_utf8(header.tid2name(tid)).unwrap();
+        String::from(name)
     }
 }

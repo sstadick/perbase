@@ -8,7 +8,7 @@ use bio::io::fasta::IndexedReader;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::pileup_position::PileupPosition,
+    position::{pileup_position::PileupPosition, Position},
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
@@ -47,6 +47,14 @@ pub struct BaseDepth {
     #[structopt(long, short = "t", default_value = utils::NUM_CPU.as_str())]
     threads: usize,
 
+    /// The number of threads to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "T", default_value = "4")]
+    compression_threads: usize,
+
+    /// The level to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "L", default_value = "2")]
+    compression_level: u32,
+
     /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
@@ -67,6 +75,17 @@ pub struct BaseDepth {
     /// Fix overlapping mates counts, see docs for full details.
     #[structopt(long, short = "m")]
     mate_fix: bool,
+
+    /// Keep positions even if they have 0 depth.
+    #[structopt(long, short = "k")]
+    keep_zeros: bool,
+
+    /// Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+    ///
+    /// **NOTE** If this is set it could result in duplicate output entries for regions that overlap.
+    /// **NOTE** This may cause issues with downstream tooling.
+    #[structopt(long, short = "M")]
+    skip_merging_intervals: bool,
 
     /// Minimum MAPQ for a read to count toward depth.
     #[structopt(long, short = "q", default_value = "0")]
@@ -96,7 +115,13 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(&self.output, self.bgzip, true)?;
+        let mut writer = utils::get_writer(
+            &self.output,
+            self.bgzip,
+            true,
+            self.compression_threads,
+            self.compression_level,
+        )?;
 
         let read_filter =
             DefaultReadFilter::new(self.include_flags, self.exclude_flags, self.min_mapq);
@@ -104,6 +129,7 @@ impl BaseDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
+            self.keep_zeros,
             if self.zero_base { 0 } else { 1 },
             read_filter,
             self.max_depth,
@@ -116,6 +142,7 @@ impl BaseDepth {
             self.ref_fasta.clone(),
             self.bed_file.clone(),
             self.bcf_file.clone(),
+            !self.skip_merging_intervals,
             Some(cpus),
             Some(self.chunksize),
             Some(self.channel_size_modifier),
@@ -143,6 +170,8 @@ struct BaseProcessor<F: ReadFilter> {
     ref_buffer: Option<reference::Buffer>,
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
+    /// Indicate whether or not to keep postitions that have zero depth
+    keep_zeros: bool,
     /// 0-based or 1-based coordiante output
     coord_base: u32,
     /// implementation of [position::ReadFilter] that will be used
@@ -161,6 +190,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         mate_fix: bool,
+        keep_zeros: bool,
         coord_base: u32,
         read_filter: F,
         max_depth: u32,
@@ -178,6 +208,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
             ref_fasta,
             ref_buffer,
             mate_fix,
+            keep_zeros,
             coord_base,
             read_filter,
             max_depth,
@@ -257,7 +288,27 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                 }
             })
             .collect();
-        result
+
+        if self.keep_zeros {
+            let mut new_result = vec![];
+            let name = PileupPosition::compact_refseq(&header, tid);
+            let mut pos = start;
+            if let Some(position) = result.get(0) {
+                while pos < (position.pos - self.coord_base) {
+                    new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                    pos += 1;
+                }
+                pos += result.len() as u32;
+                new_result.extend(result.into_iter());
+            }
+            while pos < stop {
+                new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                pos += 1;
+            }
+            new_result
+        } else {
+            result
+        }
     }
 }
 
@@ -335,13 +386,13 @@ mod tests {
 
         // Update the test/test.bam file
         let mut writer =
-            bam::Writer::from_path(&path, &header, bam::Format::BAM).expect("Created writer");
+            bam::Writer::from_path(&path, &header, bam::Format::Bam).expect("Created writer");
         for record in records.iter() {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
                       // build the index
-        bam::index::build(&path, None, bam::index::Type::BAI, 1).unwrap();
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
         (path, tempdir)
     }
 
@@ -357,6 +408,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            false,
             1,
             read_filter,
             500_000,
@@ -369,6 +421,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -398,6 +451,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            false,
             1,
             read_filter,
             500_000,
@@ -410,6 +464,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -439,6 +494,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            false,
             1,
             read_filter,
             500_000,
@@ -451,6 +507,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),
@@ -480,6 +537,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            false,
             1,
             read_filter,
             500_000,
@@ -492,6 +550,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             Some(cpus),
             None,
             Some(0.001),

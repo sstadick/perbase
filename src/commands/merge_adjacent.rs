@@ -17,6 +17,14 @@ pub struct MergeAdjacent {
     /// Input bed-like file, defaults to STDIN.
     in_file: Option<PathBuf>,
 
+    /// The number of threads to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "T", default_value = utils::NUM_CPU.as_str())]
+    compression_threads: usize,
+
+    /// The level to use for compressing output (specified by --bgzip)
+    #[structopt(long, short = "L", default_value = "2")]
+    compression_level: u32,
+
     /// Indicate if the input file does not have a header
     #[structopt(long, short = "n")]
     no_header: bool,
@@ -40,7 +48,13 @@ impl MergeAdjacent {
                 .map(utils::is_bgzipped)
                 .unwrap_or(false),
         )?;
-        let mut writer = utils::get_writer(&self.output, self.bgzip, true)?;
+        let mut writer = utils::get_writer(
+            &self.output,
+            self.bgzip,
+            true,
+            self.compression_threads,
+            self.compression_level,
+        )?;
         let mut iter = reader.deserialize().map(|r| {
             let rec: BedLike = r.expect("Deserialzied record");
             rec

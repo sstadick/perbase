@@ -100,6 +100,7 @@
 //!         None,                                 // optional ref fasta
 //!         None,                                 // optional bcf/vcf file specifying positions of interest
 //!         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
+//!         true,                                 // merge any overlapping intervals in the BED file
 //!         None,                                 // optional allowed number of threads, defaults to max
 //!         None,                                 // optional chunksize modification
 //!         None,                                 // optional channel size modification
@@ -119,7 +120,7 @@
 //! }
 //!```
 #![warn(missing_docs)]
-#![warn(missing_doc_code_examples)]
+#![warn(rustdoc::missing_doc_code_examples)]
 pub mod par_granges;
 pub mod position;
 pub mod read_filter;
