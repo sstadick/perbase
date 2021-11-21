@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.8.0
+
+- Added `--keep-zeros` option to prevent truncating regions that have 0 depth at the start / end of the interval
+- Added `--skip-merging-intervals` to prevent the merging of overlapping intervals if a BED/VCF/BCF file is used to specify regions. This will produce duplicate entries
+- [Improved](https://github.com/sstadick/perbase/issues/42) error message for invalid BED file
+- [Improved](https://github.com/sstadick/perbase/issues/41) handling of 3-column BED files (they now work)
+- Moved to `gzp` for multithreaded BGZF output writing when specified. Also added compression-threads and compression-level options
+- Updated all deps
+
 ## 0.7.4
 
 - Add `--bed-format` flag to `only-depth` to output a bed-like file with the depth in the 5th column and no headers.
