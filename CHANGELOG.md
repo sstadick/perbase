@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 0.8.1
+
+- Bugfix `--keep-zeros` and `--no-merge` had an incorrect conditional resulting in all positions being filtered out.
+
 ## 0.8.0
 
 - Added `--keep-zeros` option to prevent truncating regions that have 0 depth at the start / end of the interval
