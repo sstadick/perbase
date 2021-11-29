@@ -241,7 +241,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             let mut results = vec![];
             for (i, count) in counter.iter().enumerate() {
                 sum += count;
-                if sum != 0 && !self.keep_zeros {
+                if sum != 0 || self.keep_zeros {
                     let mut pos = RangePositions::new(
                         String::from(contig),
                         region_start + i as u32 + self.coord_base,
