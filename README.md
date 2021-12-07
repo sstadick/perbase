@@ -181,7 +181,7 @@ Regarding mate fixes, `perbase` will make "fixes" based only on the counted regi
 
 For the fastest possible output, use `only-depth --fast-mode`.
 
-**Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundary. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem. Additionally, you can pipe into `merge-adjcent` which will fix it as well. EX: `perbase only-depth -m file.bam | perbase merge-adjacent > out.tsv`.
+**Note** that it is possible that two adjacent positions may not merge if they fall at a `--chunksize` boundary. If this is an issue you can set the `--chunksize` to the size of the largest contig in question. At a future date this may be fixed or a post processing tool may be provided to fix it. For most use cases this should not be a problem. Additionally, you can pipe into `merge-adjacent` which will fix it as well. EX: `perbase only-depth -m file.bam | perbase merge-adjacent > out.tsv`.
 
 Example output of `perbase only-depth --mate-fix --zero-base  ./test/test.bam`:
 
