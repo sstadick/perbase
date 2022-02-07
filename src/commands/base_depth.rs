@@ -80,7 +80,7 @@ pub struct BaseDepth {
     #[structopt(long, short = "k")]
     keep_zeros: bool,
 
-    /// Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+    /// Skip merging togther regions specified in the optional BED or BCF/VCF files.
     ///
     /// **NOTE** If this is set it could result in duplicate output entries for regions that overlap.
     /// **NOTE** This may cause issues with downstream tooling.
