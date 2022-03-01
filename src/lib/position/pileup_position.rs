@@ -10,14 +10,19 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{alias::String, LazyCompact, SmartString};
+use std::collections::HashMap;
 use std::{cmp::Ordering, default};
+use crate::utils::most_frequent;
 
 /// Hold all information about a position.
-// NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
+// NB: The max depth that htslib will return is i32::MAX, and the type of pos for htslib is u32
 // There is no reason to go bigger, for now at least
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct PileupPosition {
+    /// The name of a genome region
+    #[serde(rename = "NAME")]
+    pub region_name: String,
     /// Reference sequence name.
     #[serde(rename = "REF")]
     pub ref_seq: String,
@@ -41,6 +46,13 @@ pub struct PileupPosition {
     /// Number of insertions that start to the right of this position.
     /// Does not count toward depth.
     pub ins: u32,
+    /// Possible insert base length for the (above) insertions
+    #[serde(skip_serializing)]
+    pub ins_len_map: HashMap<u32, usize>,
+    /// the most frequency insert length with bp flag
+    pub hf_ins_len: std::string::String,
+    /// the most frequency for the (above) insert length
+    pub hf_ins_count: usize,
     /// Number of deletions at this position.
     pub del: u32,
     /// Number of refskips at this position. Does not count toward depth.
@@ -53,8 +65,9 @@ pub struct PileupPosition {
 
 impl Position for PileupPosition {
     /// Create a new position for the given ref_seq name.
-    fn new(ref_seq: String, pos: u32) -> Self {
+    fn new(region_name: String, ref_seq: String, pos: u32) -> Self {
         PileupPosition {
+            region_name,
             ref_seq,
             pos,
             ..default::Default::default()
@@ -112,8 +125,12 @@ impl PileupPosition {
                 }
             }
             // Check for insertions
-            if let bam::pileup::Indel::Ins(_len) = alignment.indel() {
-                self.ins += 1;
+            match alignment.indel() {
+                bam::pileup::Indel::Ins(len) => {
+                    self.ins += 1;
+                    *self.ins_len_map.entry(len).or_insert(0) += 1;
+                }
+                _ => (),
             }
         }
     }
@@ -135,10 +152,11 @@ impl PileupPosition {
         header: &bam::HeaderView,
         read_filter: &F,
         base_filter: Option<u8>,
+        region_name: String,
     ) -> Self {
         let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
-        let mut pos = Self::new(name, pileup.pos());
+        let mut pos = Self::new(region_name, String::from(name), pileup.pos());
         pos.depth = pileup.depth();
 
         for alignment in pileup.alignments() {
@@ -173,7 +191,7 @@ impl PileupPosition {
     ) -> Self {
         let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
-        let mut pos = Self::new(name, pileup.pos());
+        let mut pos = Self::new(String::from("NAME"), String::from(name), pileup.pos());
         pos.depth = pileup.depth();
 
         // Group records by qname
@@ -224,5 +242,12 @@ impl PileupPosition {
     pub fn compact_refseq(header: &HeaderView, tid: u32) -> SmartString<LazyCompact> {
         let name = std::str::from_utf8(header.tid2name(tid)).unwrap();
         String::from(name)
+    }
+
+    /// update insert length statistic, after
+    pub fn update_insert_statistic(&mut self) -> () {
+        let hf_ins_len_res = most_frequent(&self.ins_len_map);
+        self.hf_ins_count = hf_ins_len_res.0;
+        self.hf_ins_len = hf_ins_len_res.1.to_string() + " bp";
     }
 }

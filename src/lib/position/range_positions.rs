@@ -10,6 +10,9 @@ use std::default;
 #[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct RangePositions {
+    /// The name of a genome region
+    #[serde(rename = "NAME")]
+    pub region_name: String,
     /// Reference sequence name.
     #[serde(rename = "REF")]
     pub ref_seq: String,
@@ -23,8 +26,9 @@ pub struct RangePositions {
 
 impl Position for RangePositions {
     /// Create a new position for the given ref_seq name.
-    fn new(ref_seq: String, pos: u32) -> Self {
+    fn new(region_name: String, ref_seq: String, pos: u32) -> Self {
         RangePositions {
+            region_name,
             ref_seq,
             pos,
             ..default::Default::default()

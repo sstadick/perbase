@@ -1,7 +1,7 @@
-//! A library of funcionality for perbase analysis of genomic regions.
+//! A library of funcionality for perbase2 analysis of genomic regions.
 //!
 //! This library is a work in progress and subject to changes as needed by
-//! [`perbase`](https://github.com/sstadick/perbase).
+//! [`perbase`](http://github.com/Schaudge/perbase).
 //!
 //! Currently, the key module of this crate is the `par_granges` module, which allows for
 //! parallel iteration and operation over genomic intervals.
@@ -57,7 +57,7 @@
 //!     type P = PileupPosition;
 //!
 //!     // This function receives an interval to examine.
-//!     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<Self::P> {
+//!     fn process_region(&self, tid: u32, start: u32, stop: u32, region_name: String) -> Vec<Self::P> {
 //!         let mut reader = bam::IndexedReader::from_path(&self.bamfile).expect("Indexed reader");
 //!         let header = reader.header().to_owned();
 //!         // fetch the region
@@ -70,7 +70,7 @@
 //!                 // Verify that we are within the bounds of the chunk we are iterating on
 //!                 // Since pileup will pull reads that overhang edges.
 //!                 if pileup.pos() >= start && pileup.pos() < stop {
-//!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter, None))
+//!                     Some(PileupPosition::from_pileup(pileup, &header, &self.read_filter, region_name.parse().unwrap()))
 //!                 } else {
 //!                     None
 //!                 }

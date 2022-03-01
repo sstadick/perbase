@@ -151,13 +151,15 @@ impl BaseDepth {
 
         let receiver = par_granges_runner.process()?;
 
-        for pos in receiver.into_iter() {
+        for mut pos in receiver.into_iter() {
+            pos.update_insert_statistic();
             writer.serialize(pos)?
         }
 
         writer.flush()?;
         Ok(())
     }
+
 }
 
 /// Holds the info needed for [par_io::RegionProcessor] implementation
@@ -227,7 +229,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
-    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
+    fn process_region(&self, tid: u32, start: u32, stop: u32, region_name: String) -> Vec<PileupPosition> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         // Create a reader
         let mut reader =
@@ -266,6 +268,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                             &header,
                             &self.read_filter,
                             self.min_base_quality_score,
+                            region_name.parse().unwrap(),
                         )
                     };
                     // Add the ref base if reference is available
@@ -295,14 +298,14 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
             let mut pos = start;
             if let Some(position) = result.get(0) {
                 while pos < (position.pos - self.coord_base) {
-                    new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                    new_result.push(PileupPosition::new(region_name.parse().unwrap(),name.clone(), pos + self.coord_base));
                     pos += 1;
                 }
                 pos += result.len() as u32;
                 new_result.extend(result.into_iter());
             }
             while pos < stop {
-                new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                new_result.push(PileupPosition::new(region_name.parse().unwrap(), name.clone(), pos + self.coord_base));
                 pos += 1;
             }
             new_result

@@ -17,7 +17,10 @@ use perbase_lib::{
 use rust_htslib::{bam, bam::ext::BamRecordExtensions, bam::record::Cigar, bam::Read};
 use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+};
 use std::{convert::TryFrom, rc::Rc};
 use structopt::StructOpt;
 
@@ -243,6 +246,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 sum += count;
                 if sum != 0 || self.keep_zeros {
                     let mut pos = RangePositions::new(
+                        String::from(""),
                         String::from(contig),
                         region_start + i as u32 + self.coord_base,
                     );
@@ -263,7 +267,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 // freeze pos and start new one
                 if curr_depth != sum {
                     let mut pos =
-                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
+                        RangePositions::new(String::from("N"), String::from(contig), curr_start + self.coord_base);
                     pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
                     pos.end = region_start + i as u32 + self.coord_base;
 
@@ -275,7 +279,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
                 if i == counter.len() - 1 {
                     // We've hit the end
                     let mut pos =
-                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
+                        RangePositions::new(String::from("N"),String::from(contig), curr_start + self.coord_base);
                     pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
                     pos.end = region_stop + self.coord_base;
                     results.push(pos);
@@ -465,8 +469,8 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
     /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
     /// walking the pileup (checking bounds) to create Position objects according to
     /// the defined filters
-    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        trace!("Processing region {}(tid):{}-{}", tid, start, stop);
+    fn process_region(&self, tid: u32, start: u32, stop: u32, region_name: std::string::String) -> Vec<RangePositions> {
+        trace!("Processing the {} region {}(tid):{}-{}", region_name, tid, start, stop);
         if self.fast_mode {
             self.process_region_fast(tid, start, stop)
         } else {

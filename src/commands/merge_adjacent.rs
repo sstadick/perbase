@@ -111,6 +111,7 @@ impl MergeAdjacent {
 
         Ok(())
     }
+
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -11,6 +11,9 @@ use std::{
     path::Path,
 };
 use termcolor::ColorChoice;
+use std::cmp::{Eq, Ord};
+use std::collections::{BinaryHeap, HashMap};
+use std::hash::Hash;
 
 /// Set rayon global thread pool size.
 ///
@@ -155,4 +158,18 @@ pub fn get_writer<P: AsRef<Path>>(
 lazy_static! {
     /// Return the number of cpus as an &str
     pub static ref NUM_CPU: String = num_cpus::get().to_string();
+}
+
+/// get the most frequency element in a HashMap collection!
+pub fn most_frequent<T>(collection: &HashMap<T, usize>) -> (usize, T)
+    where T: Hash + Eq + Ord + Copy + Clone + Default, {
+
+    let mut heap = BinaryHeap::with_capacity(3);
+    for (x, count) in collection.into_iter() {
+        heap.push((count, x));
+    }
+    match heap.pop() {
+        Some(qualified_return) => (*qualified_return.0, *qualified_return.1),
+        None => (0, Default::default()),
+    }
 }
