@@ -1,5 +1,10 @@
 # CHANGELOG
 
+已确认的修改功能（与官方版本的差异）：
+
+1. 修正输出参数的功能
+2. 添加 INS 的两个字段，最高频插入的长度、最高频插入长度的数量
+
 ## 0.8.1
 
 - Bugfix `--keep-zeros` and `--no-merge` had an incorrect conditional resulting in all positions being filtered out.
