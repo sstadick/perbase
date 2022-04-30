@@ -46,6 +46,8 @@ The output columns are as follows:
 | T              | Total T nucleotides seen at this position                                                          |
 | N              | Total N nucleotides seen at this position                                                          |
 | INS            | Total insertions that start at the base to the right of this position                              |
+| HF_INS_LEN     | The length of the most high frequent insertions to the right of this position                      |
+| HF_INS_COUNT   | Total counts for the most high frequent insertions to the right of this position                   |
 | DEL            | Total deletions covering this position                                                             |
 | REF_SKIP       | Total reference skip operations covering this position                                             |
 | FAIL           | Total reads failing filters that covered this position (their bases were not counted toward depth) |
