@@ -37,7 +37,7 @@ log = "0.4.16"
 lru_time_cache = "0.11.11"
 num_cpus = "1.13.1"
 rayon = "1.5.1"
-rust-htslib = { version = "0.38.2", features = ["libdeflate"] }
+rust-htslib = { version = "0.38.2" }
 rust-lapper = "1.0.0"
 serde = { version = "1.0.136", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }
