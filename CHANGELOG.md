@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 0.8.2
+
+- Updated dependencies
+
 ## 0.8.1
 
 - Bugfix `--keep-zeros` and `--no-merge` had an incorrect conditional resulting in all positions being filtered out.
