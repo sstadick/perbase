@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 0.8.3
+
+- Updated dependencies - to fixed version of gzp
+
 ## 0.8.2
 
 - Updated dependencies
