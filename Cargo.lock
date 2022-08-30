@@ -1002,7 +1002,7 @@ checksum = "0c520e05135d6e763148b6426a837e239041653ba7becd2e538c076c738025fc"
 
 [[package]]
 name = "perbase"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "bio",
