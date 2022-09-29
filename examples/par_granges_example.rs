@@ -91,8 +91,8 @@ fn main() -> Result<()> {
     let par_granges_runner = par_granges::ParGranges::new(
         PathBuf::from("test/test.bam"),       // pass in bam
         None,                                 // optional ref fasta
-        None, // optional bcf/vcf file to specify positions of interest
         Some(PathBuf::from("test/test.bed")), // bedfile to narrow regions
+        None, // optional bcf/vcf file to specify positions of interest
         true, // Merge any overlapping regions in the BED file
         None, // optional allowed number of threads, defaults to max
         None, // optional chunksize modification
