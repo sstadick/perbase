@@ -10,6 +10,7 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{alias::String, LazyCompact, SmartString};
+use std::collections::{HashMap, HashSet};
 use std::{cmp::Ordering, default};
 
 /// Hold all information about a position.
@@ -176,25 +177,36 @@ impl PileupPosition {
         let mut pos = Self::new(name, pileup.pos());
         pos.depth = pileup.depth();
 
-        // Group records by qname
-        let grouped_by_qname = pileup
-            .alignments()
-            .map(|aln| {
-                let record = aln.record();
-                (aln, record)
-            })
-            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
-            // TODO: I'm not sure there is a good way to remove this allocation
-            .group_by(|a| a.1.qname().to_owned());
+        let mut by_name = HashMap::new();
+        // saves qnames that we know don't overlap (from first in pair)
+        let mut no_overlap = HashSet::new();
 
-        for (_qname, reads) in grouped_by_qname.into_iter() {
+        pileup.alignments().for_each(|aln| {
+            let record = aln.record();
+            let name = record.qname().to_owned();
+            if record.tid() != record.mtid() || record.cigar().end_pos() < record.mpos() {
+                // we know this doesn't overlap and it's likely left-most
+                Self::update(&mut pos, &aln, record, read_filter, base_filter);
+                no_overlap.insert(name);
+            } else if no_overlap.take(record.qname()).is_some() {
+                // we know the earlier mate didn't overlap so this one also doesn't.
+                // likely this can't happen because then they wouldn't be in same column
+                Self::update(&mut pos, &aln, record, read_filter, base_filter);
+            } else {
+                by_name.entry(name).or_insert_with(Vec::new).push(aln);
+            }
+        });
+
+        // Group records by qname
+        for (_qname, reads) in by_name.into_iter() {
             // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
             let (alignment, record) = reads
                 .into_iter()
                 .map(|x| {
                     total_reads += 1;
-                    x
+                    let record = x.record();
+                    (x, record)
                 })
                 .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
                     Ordering::Greater => Ordering::Greater,
