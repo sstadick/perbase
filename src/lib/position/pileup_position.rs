@@ -198,15 +198,21 @@ impl PileupPosition {
         });
 
         // Group records by qname
-        for (_qname, reads) in by_name.into_iter() {
+        for (_qname, alignments) in by_name.into_iter() {
             // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
-            let (alignment, record) = reads
+            if alignments.len() == 1 {
+                let aln = &alignments[0];
+                let record = aln.record();
+                Self::update(&mut pos, aln, record, read_filter, base_filter);
+                continue;
+            }
+            let (alignment, record) = alignments
                 .into_iter()
-                .map(|x| {
+                .map(|aln| {
                     total_reads += 1;
-                    let record = x.record();
-                    (x, record)
+                    let record = aln.record();
+                    (aln, record)
                 })
                 .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
                     Ordering::Greater => Ordering::Greater,
