@@ -1,7 +1,6 @@
 //! An implementation of `Position` for dealing with pileups.
 use crate::position::Position;
 use crate::read_filter::ReadFilter;
-use itertools::Itertools;
 use rust_htslib::bam::{
     self,
     pileup::{Alignment, Pileup},
@@ -10,7 +9,7 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{alias::String, LazyCompact, SmartString};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::{cmp::Ordering, default};
 
 /// Hold all information about a position.
@@ -178,22 +177,18 @@ impl PileupPosition {
         pos.depth = pileup.depth();
 
         let mut by_name = HashMap::new();
-        // saves qnames that we know don't overlap (from first in pair)
-        let mut no_overlap = HashSet::new();
 
         pileup.alignments().for_each(|aln| {
             let record = aln.record();
-            let name = record.qname().to_owned();
             if record.tid() != record.mtid() || record.cigar().end_pos() < record.mpos() {
                 // we know this doesn't overlap and it's likely left-most
                 Self::update(&mut pos, &aln, record, read_filter, base_filter);
-                no_overlap.insert(name);
-            } else if no_overlap.take(record.qname()).is_some() {
-                // we know the earlier mate didn't overlap so this one also doesn't.
-                // likely this can't happen because then they wouldn't be in same column
-                Self::update(&mut pos, &aln, record, read_filter, base_filter);
             } else {
-                by_name.entry(name).or_insert_with(Vec::new).push(aln);
+                let name = record.qname().to_owned();
+                by_name
+                    .entry(name)
+                    .or_insert_with(Vec::new)
+                    .push((aln, record));
             }
         });
 
@@ -202,16 +197,15 @@ impl PileupPosition {
             // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
             if alignments.len() == 1 {
-                let aln = &alignments[0];
-                let record = aln.record();
-                Self::update(&mut pos, aln, record, read_filter, base_filter);
+                // unwrap is safe here as we know we have one element
+                let (aln, record) = alignments.into_iter().next().unwrap();
+                Self::update(&mut pos, &aln, record, read_filter, base_filter);
                 continue;
             }
             let (alignment, record) = alignments
                 .into_iter()
-                .map(|aln| {
+                .map(|(aln, record)| {
                     total_reads += 1;
-                    let record = aln.record();
                     (aln, record)
                 })
                 .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
