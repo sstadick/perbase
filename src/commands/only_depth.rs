@@ -307,7 +307,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         for record in reader
             .rc_records()
             .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(&read))
+            .filter(|read| self.read_filter.filter_read(&read, None))
             .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
         {
             let rec_start = u32::try_from(record.0).expect("check overflow");
@@ -396,7 +396,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         for record in reader
             .rc_records()
             .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(&read))
+            .filter(|read| self.read_filter.filter_read(&read, None))
         {
             let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
             let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");
