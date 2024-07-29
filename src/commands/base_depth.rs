@@ -293,13 +293,14 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
             let mut new_result = vec![];
             let name = PileupPosition::compact_refseq(&header, tid);
             let mut pos = start;
-            if let Some(position) = result.get(0) {
+
+            for position in result.into_iter() {
                 while pos < (position.pos - self.coord_base) {
                     new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
                     pos += 1;
                 }
-                pos += result.len() as u32;
-                new_result.extend(result.into_iter());
+                new_result.push(position);
+                pos += 1;
             }
             while pos < stop {
                 new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
@@ -440,6 +441,49 @@ mod tests {
     }
 
     #[fixture]
+    fn non_mate_aware_keep_zeros_positions(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<PileupPosition>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
+        let base_processor = BaseProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,
+            true, // keep-zeros
+            1,
+            read_filter,
+            500_000,
+            cpus,
+            None,
+        );
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            None,
+            true,
+            Some(cpus),
+            None,
+            Some(0.001),
+            base_processor,
+        );
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
+                pos.push(p)
+            });
+        positions
+    }
+
+    #[fixture]
     fn mate_aware_positions(
         bamfile: (PathBuf, TempDir),
         read_filter: DefaultReadFilter,
@@ -452,6 +496,49 @@ mod tests {
             None,
             true, // mate aware
             false,
+            1,
+            read_filter,
+            500_000,
+            cpus,
+            None,
+        );
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bamfile.0,
+            None,
+            None,
+            None,
+            true,
+            Some(cpus),
+            None,
+            Some(0.001),
+            base_processor,
+        );
+        let mut positions = HashMap::new();
+        par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .for_each(|p| {
+                let pos = positions.entry(p.ref_seq.clone()).or_insert_with(Vec::new);
+                pos.push(p)
+            });
+        positions
+    }
+
+    #[fixture]
+    fn mate_aware_keep_zeros_positions(
+        bamfile: (PathBuf, TempDir),
+        read_filter: DefaultReadFilter,
+    ) -> HashMap<String, Vec<PileupPosition>> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+
+        // Use the number of cpus available as a proxy for how may ref seqs to hold in memory at one time.
+        let base_processor = BaseProcessor::new(
+            bamfile.0.clone(),
+            None,
+            false,// mate aware
+            true, // keep-zeros
             1,
             read_filter,
             500_000,
@@ -650,16 +737,19 @@ mod tests {
 
     #[rstest(
         positions,
-        awareness_modifier,
-        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), 0),
-        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
-        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), 0),
-        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0),
-        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), 0)
+        keep_zeros,
+        case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), false),
+        case::mate_aware(mate_aware_positions(bamfile(), read_filter()), false),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), false),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), false),
+        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), false),
+        case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), false),
+        case::mate_unaware_keep_zeros(non_mate_aware_keep_zeros_positions(bamfile(), read_filter()), true),
+        case::mate_aware_keep_zeros(mate_aware_keep_zeros_positions(bamfile(), read_filter()), true),
     )]
-    fn check_depths(positions: HashMap<String, Vec<PileupPosition>>, awareness_modifier: u32) {
+    fn check_depths(positions: HashMap<String, Vec<PileupPosition>>, keep_zeros: bool) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
+        assert_eq!(positions.get("chr1").unwrap()[1].depth, 1);
         assert_eq!(positions.get("chr1").unwrap()[4].depth, 2);
         assert_eq!(positions.get("chr1").unwrap()[9].depth, 3);
         assert_eq!(positions.get("chr1").unwrap()[14].depth, 4);
@@ -668,8 +758,45 @@ mod tests {
         assert_eq!(positions.get("chr1").unwrap()[29].depth, 3);
         assert_eq!(positions.get("chr1").unwrap()[34].depth, 2);
         assert_eq!(positions.get("chr1").unwrap()[39].depth, 1);
-        // NB: -6 bc there are 6 positions with no coverage from 44-50
-        assert_eq!(positions.get("chr1").unwrap()[78 - 6].depth, 4);
+
+        if !keep_zeros {
+            // NB: -6 bc there are 6 positions with no coverage from 44-50
+            assert_eq!(positions.get("chr1").unwrap()[78 - 6].depth, 4);
+        } else {
+            // NB: with --keep-zeros then there should be no skipped loci 
+            assert_eq!(positions.get("chr1").unwrap().len(), 100);
+
+            // NB: Since positions[0].pos == 1 for this test data: positions[i].pos == i+1
+            for (i,p) in positions.get("chr1").unwrap().iter().enumerate() {
+                assert_eq!(p.pos, (i+1).try_into().unwrap());
+            }
+
+            assert_eq!(positions.get("chr1").unwrap()[43].depth, 1);
+            assert_eq!(positions.get("chr1").unwrap()[44].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[45].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[46].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[47].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[48].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[49].depth, 1);
+            assert_eq!(positions.get("chr1").unwrap()[53].depth, 1);
+            assert_eq!(positions.get("chr1").unwrap()[54].depth, 2);
+            assert_eq!(positions.get("chr1").unwrap()[55].depth, 2);
+            assert_eq!(positions.get("chr1").unwrap()[56].depth, 2);
+            assert_eq!(positions.get("chr1").unwrap()[57].depth, 2);
+            assert_eq!(positions.get("chr1").unwrap()[58].depth, 2);
+            assert_eq!(positions.get("chr1").unwrap()[59].depth, 3);
+            assert_eq!(positions.get("chr1").unwrap()[60].depth, 3);
+            assert_eq!(positions.get("chr1").unwrap()[61].depth, 3);
+            assert_eq!(positions.get("chr1").unwrap()[62].depth, 3);
+            assert_eq!(positions.get("chr1").unwrap()[63].depth, 3);
+            assert_eq!(positions.get("chr1").unwrap()[64].depth, 4);
+            assert_eq!(positions.get("chr1").unwrap()[68].depth, 4);
+            assert_eq!(positions.get("chr1").unwrap()[93].depth, 1);
+            assert_eq!(positions.get("chr1").unwrap()[94].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[95].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[96].depth, 0);
+            assert_eq!(positions.get("chr1").unwrap()[99].depth, 0);
+        }
     }
 
     #[rstest(
