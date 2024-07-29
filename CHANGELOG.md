@@ -45,3 +45,7 @@
 - Changed log level of "Batch Processing ...", "Processing ...", and "Processing region" logging statements to `trace`. Set `RUST_LOG=trace` environment variable to restore previous logging verbosity.
 - Added "Processing TID ..." log statement at `info` level (on by default).
 - All `perbase` commands now gracefully handle broken pipes and exit 0.
+
+## 0.10.0
+
+- [fix](https://github.com/sstadick/perbase/pull/73) from @biermanr for [71](https://github.com/sstadick/perbase/issues/71) (--keep-zeros skip/dup loci)
