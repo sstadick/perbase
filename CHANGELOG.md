@@ -49,3 +49,7 @@
 ## 0.10.0
 
 - [fix](https://github.com/sstadick/perbase/pull/73) from @biermanr for [71](https://github.com/sstadick/perbase/issues/71) (--keep-zeros skip/dup loci)
+
+## 0.10.1
+
+- [fix](https://github.com/sstadick/perbase/issues/74) from @nkkarpov updates smartstring version wich fixes some UB in old smartstring.
