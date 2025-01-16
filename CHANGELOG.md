@@ -1,5 +1,6 @@
 # CHANGELOG
 
+
 ## 0.8.3
 
 - Updated dependencies - to fixed version of gzp
@@ -53,3 +54,7 @@
 ## 0.10.1
 
 - [fix](https://github.com/sstadick/perbase/issues/74) from @nkkarpov updates smartstring version wich fixes some UB in old smartstring.
+
+## 0.10.2
+
+- [fix](https://github.com/sstadick/perbase/pull/78) Update htslib version v0.39 by @davidecarlson
