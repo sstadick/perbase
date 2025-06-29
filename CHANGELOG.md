@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## 0.10.3
+
+- **Bugfix**: Fixed mate selection in `--mate-fix` to correctly prefer first mate over second mate when MAPQ scores are equal (issue #82)
 
 ## 0.8.3
 

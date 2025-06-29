@@ -201,9 +201,9 @@ impl PileupPosition {
                     Ordering::Less => Ordering::Less,
                     Ordering::Equal => {
                         // Check if a is first in pair
-                        if a.1.flags() & 64 == 0 && read_filter.filter_read(&a.1, Some(&a.0)) {
+                        if a.1.flags() & 64 != 0 && read_filter.filter_read(&a.1, Some(&a.0)) {
                             Ordering::Greater
-                        } else if b.1.flags() & 64 == 0 && read_filter.filter_read(&b.1, Some(&b.0))
+                        } else if b.1.flags() & 64 != 0 && read_filter.filter_read(&b.1, Some(&b.0))
                         {
                             Ordering::Less
                         } else {
@@ -225,5 +225,95 @@ impl PileupPosition {
     pub fn compact_refseq(header: &HeaderView, tid: u32) -> SmartString<LazyCompact> {
         let name = std::str::from_utf8(header.tid2name(tid)).unwrap();
         String::from(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::read_filter::DefaultReadFilter;
+    use rust_htslib::bam::{self, record::Record, Read};
+
+    /// Test that from_pileup_mate_aware chooses first mate when MAPQ scores are equal
+    /// This verifies the fix for issue #82 by testing the actual function with overlapping mates
+    #[test]
+    fn test_from_pileup_mate_aware_chooses_first_mate() {
+        use rust_htslib::bam::{index, IndexedReader, Writer};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("test.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Create overlapping mate pair with equal MAPQ where they disagree on a base
+        // Both mates overlap at position 15 (1-based)
+        // First mate has 'A' at position 15, second mate has 'C' at position 15
+        // Both have MAPQ 40, so tie-breaker should choose first mate
+        let records = vec![
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t67\tchr1\t10\t40\t10M\tchr1\t15\t30\tAAAAAAAAAA\t##########",
+            )
+            .unwrap(),
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t147\tchr1\t15\t40\t10M\tchr1\t10\t30\tCCCCCCCCCC\t##########",
+            )
+            .unwrap(),
+        ];
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and create pileup at the overlapping position (15, 1-based = 14, 0-based)
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let header_view = reader.header().clone();
+
+        // Set up pileup at position 14 (0-based) where both mates overlap
+        reader.fetch(("chr1", 14, 15)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        // Find the pileup at position 14
+        let mut found_position = false;
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 14 {
+                // 0-based position 14 = 1-based position 15
+                found_position = true;
+
+                // Test mate-aware processing
+                let position = PileupPosition::from_pileup_mate_aware(
+                    pileup,
+                    &header_view,
+                    &read_filter,
+                    None,
+                );
+
+                // Should choose first mate's 'A' over second mate's 'C'
+                // Depth should be 1 (one mate chosen from the overlapping pair)
+                assert_eq!(position.depth, 1, "Depth should be 1 after mate selection");
+                assert_eq!(position.a, 1, "Should count first mate's A base");
+                assert_eq!(position.c, 0, "Should not count second mate's C base");
+                break;
+            }
+        }
+
+        assert!(found_position, "Should have found pileup at position 14");
     }
 }
