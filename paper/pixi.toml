@@ -1,0 +1,14 @@
+[workspace]
+authors = ["Seth Stadick <sstadick@gmail.com>"]
+channels = ["conda-forge", "bioconda"]
+name = "perbase"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+bam-readcount = ">=1.0.1,<2"
+samtools = ">=1.22,<2"
+sambamba = ">=1.0.1,<2"
+mosdepth = ">=0.3.11,<0.4"

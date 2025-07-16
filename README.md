@@ -78,7 +78,9 @@ chr1	8	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
 chr1	9	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
 ```
 
-If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed an match the BAM/CRAM header of the input.
+If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
+
+If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed and match the BAM/CRAM header of the input.
 
 The output can be compressed and indexed as follows:
 
