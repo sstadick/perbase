@@ -3,14 +3,15 @@ use crate::position::Position;
 use crate::read_filter::ReadFilter;
 use itertools::Itertools;
 use rust_htslib::bam::{
-    self,
+    self, HeaderView,
     pileup::{Alignment, Pileup},
     record::Record,
-    HeaderView,
 };
 use serde::Serialize;
-use smartstring::{alias::String, LazyCompact, SmartString};
-use std::{cmp::Ordering, default};
+use smartstring::{LazyCompact, SmartString, alias::String};
+use std::default;
+
+use super::mate_fix::{Base, MateResolutionStrategy};
 
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
@@ -38,6 +39,18 @@ pub struct PileupPosition {
     pub t: u32,
     /// Number of N bases at this position. Any unrecognized base will be counted as an N.
     pub n: u32,
+    /// Number of bases that could be A or G
+    pub r: u32,
+    /// Number of bases that could be C or T
+    pub y: u32,
+    /// Number of bases that could be G or C
+    pub s: u32,
+    /// Number of bases that could be A or T
+    pub w: u32,
+    /// Number of bases that could be G or T
+    pub k: u32,
+    /// Number of bases that could be A or C
+    pub m: u32,
     /// Number of insertions that start to the right of this position.
     /// Does not count toward depth.
     pub ins: u32,
@@ -68,11 +81,12 @@ impl PileupPosition {
     fn update<F: ReadFilter>(
         &mut self,
         alignment: &Alignment,
-        record: Record,
+        record: &Record,
         read_filter: &F,
         base_filter: Option<u8>,
+        recommended_base: Option<Base>,
     ) {
-        if !read_filter.filter_read(&record, Some(alignment)) {
+        if !read_filter.filter_read(record, Some(alignment)) {
             self.depth -= 1;
             self.fail += 1;
             return;
@@ -88,25 +102,30 @@ impl PileupPosition {
             // We have an actual base!
 
             // Check if we are checking the base quality score
-            if let Some(base_qual_filter) = base_filter {
-                // Check if the base quality score is greater or equal to than the cutoff
-                // TODO: When `if let` + && / || stabilizes clean this up.
-                if record.qual()[alignment.qpos().unwrap()] < base_qual_filter {
-                    self.n += 1
-                } else {
-                    match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
-                        'A' => self.a += 1,
-                        'C' => self.c += 1,
-                        'T' => self.t += 1,
-                        'G' => self.g += 1,
-                        _ => self.n += 1,
-                    }
+            // && Check if the base quality score is greater or equal to than the cutoff
+            if let Some(base_qual_filter) = base_filter
+                && record.qual()[alignment.qpos().unwrap()] < base_qual_filter
+            {
+                self.n += 1
+            } else if let Some(b) = recommended_base {
+                match b {
+                    Base::A => self.a += 1,
+                    Base::C => self.c += 1,
+                    Base::T => self.t += 1,
+                    Base::G => self.g += 1,
+                    Base::R => self.r += 1,
+                    Base::Y => self.y += 1,
+                    Base::S => self.s += 1,
+                    Base::W => self.w += 1,
+                    Base::K => self.k += 1,
+                    Base::M => self.m += 1,
+                    _ => self.n += 1,
                 }
             } else {
                 match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
                     'A' => self.a += 1,
                     'C' => self.c += 1,
-                    'T' => self.t += 1,
+                    'T' | 'U' => self.t += 1,
                     'G' => self.g += 1,
                     _ => self.n += 1,
                 }
@@ -143,7 +162,14 @@ impl PileupPosition {
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
+            Self::update(
+                &mut pos,
+                &alignment,
+                &record,
+                read_filter,
+                base_filter,
+                None,
+            );
         }
         pos
     }
@@ -190,32 +216,29 @@ impl PileupPosition {
         for (_qname, reads) in grouped_by_qname.into_iter() {
             // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
-            let (alignment, record) = reads
-                .into_iter()
-                .map(|x| {
-                    total_reads += 1;
-                    x
-                })
-                .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
-                    Ordering::Greater => Ordering::Greater,
-                    Ordering::Less => Ordering::Less,
-                    Ordering::Equal => {
-                        // Check if a is first in pair
-                        if a.1.flags() & 64 != 0 && read_filter.filter_read(&a.1, Some(&a.0)) {
-                            Ordering::Greater
-                        } else if b.1.flags() & 64 != 0 && read_filter.filter_read(&b.1, Some(&b.0))
-                        {
-                            Ordering::Less
-                        } else {
-                            // Default to `a` in the event that there is no first in pair for some reason
-                            Ordering::Greater
-                        }
-                    }
-                })
-                .unwrap();
-            // decrement depth for each read not used
-            pos.depth -= total_reads - 1;
-            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
+            let strat = MateResolutionStrategy::Original;
+
+            let mut reads = reads
+                .inspect(|_| total_reads += 1)
+                .sorted_by(|a, b| strat.cmp(a, b, read_filter).ordering.reverse());
+            let best = &reads.next().unwrap();
+
+            if let Some(second_best) = &reads.next().as_ref() {
+                // Deal explicitly with mate overlap, they are already ordered correctly
+                let result = strat.cmp(best, second_best, read_filter);
+                pos.depth -= total_reads - 1;
+                Self::update(
+                    &mut pos,
+                    &best.0,
+                    &best.1,
+                    read_filter,
+                    base_filter,
+                    result.recommended_base,
+                );
+            } else {
+                pos.depth -= total_reads - 1;
+                Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+            }
         }
         pos
     }
@@ -232,13 +255,13 @@ impl PileupPosition {
 mod tests {
     use super::*;
     use crate::read_filter::DefaultReadFilter;
-    use rust_htslib::bam::{self, record::Record, Read};
+    use rust_htslib::bam::{self, Read, record::Record};
 
     /// Test that from_pileup_mate_aware chooses first mate when MAPQ scores are equal
     /// This verifies the fix for issue #82 by testing the actual function with overlapping mates
     #[test]
     fn test_from_pileup_mate_aware_chooses_first_mate() {
-        use rust_htslib::bam::{index, IndexedReader, Writer};
+        use rust_htslib::bam::{IndexedReader, Writer, index};
         use tempfile::tempdir;
 
         let tempdir = tempdir().unwrap();
