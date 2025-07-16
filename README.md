@@ -73,7 +73,7 @@ chr1    709645  G       16      0       0       16      0       0       0       
 
 If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
 
-If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed an match the BAM/CRAM header of the input.
+If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed and match the BAM/CRAM header of the input.
 
 The output can be compressed and indexed as follows:
 
