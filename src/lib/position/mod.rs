@@ -1,5 +1,5 @@
 //! A set of implementations of `Position` for different use cases
-mod mate_fix;
+pub mod mate_fix;
 pub mod pileup_position;
 pub mod range_positions;
 

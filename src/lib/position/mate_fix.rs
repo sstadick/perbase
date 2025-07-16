@@ -40,6 +40,7 @@
 //! MAPQ -> first in pair
 use crate::read_filter::ReadFilter;
 use rust_htslib::bam::{self, pileup::Alignment, record::Record};
+use strum::EnumString;
 
 use std::cmp::Ordering;
 
@@ -138,7 +139,8 @@ impl MateResolution {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, EnumString)]
+#[strum(ascii_case_insensitive)]
 pub enum MateResolutionStrategy {
     BaseQualMapQualFirstInPair,
     BaseQualMapQualIUPAC,
@@ -403,5 +405,249 @@ impl MateResolutionStrategy {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::read_filter::ReadFilter;
+    use rust_htslib::bam::{self, record::Record};
+    use std::collections::HashMap;
+
+    // Mock ReadFilter for testing
+    struct MockReadFilter {
+        should_pass: HashMap<Vec<u8>, bool>,
+    }
+
+    impl MockReadFilter {
+        fn new() -> Self {
+            Self {
+                should_pass: HashMap::new(),
+            }
+        }
+
+        fn set_filter(&mut self, qname: &[u8], pass: bool) {
+            self.should_pass.insert(qname.to_vec(), pass);
+        }
+    }
+
+    impl ReadFilter for MockReadFilter {
+        fn filter_read(
+            &self,
+            record: &Record,
+            _alignment: Option<&bam::pileup::Alignment>,
+        ) -> bool {
+            self.should_pass
+                .get(record.qname())
+                .copied()
+                .unwrap_or(true)
+        }
+    }
+
+    // Helper to create a test record
+    fn create_test_record(
+        qname: &[u8],
+        flag: u16,
+        mapq: u8,
+        seq: &[u8],
+        qual: &[u8],
+        pos: i64,
+    ) -> Record {
+        let mut record = Record::new();
+        record.set_qname(qname);
+        record.set_flags(flag);
+        record.set_mapq(mapq);
+        record.set_pos(pos);
+
+        // Create a simple CIGAR string (all matches)
+        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(seq.len() as u32)]);
+        record.set(qname, Some(&cigar), seq, qual);
+
+        record
+    }
+
+    // Mock alignment for testing
+    struct MockAlignment {
+        qpos: Option<usize>,
+        is_del: bool,
+        is_refskip: bool,
+        indel: bam::pileup::Indel,
+    }
+
+    impl MockAlignment {
+        fn new(qpos: Option<usize>) -> Self {
+            Self {
+                qpos,
+                is_del: false,
+                is_refskip: false,
+                indel: bam::pileup::Indel::None,
+            }
+        }
+
+        fn with_indel(mut self, indel: bam::pileup::Indel) -> Self {
+            self.indel = indel;
+            self
+        }
+
+        fn with_deletion(mut self) -> Self {
+            self.is_del = true;
+            self
+        }
+
+        fn with_refskip(mut self) -> Self {
+            self.is_refskip = true;
+            self
+        }
+    }
+
+    // Since we can't directly create Alignment objects, we need to work around this
+    // by testing the internal functions directly
+
+    // Base enum tests
+    #[test]
+    fn test_base_either_or_identical() {
+        assert!(matches!(
+            Base::either_or::<false>(Base::A, Base::A),
+            Base::A
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::C, Base::C),
+            Base::C
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::G, Base::G),
+            Base::G
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::T, Base::T),
+            Base::T
+        ));
+    }
+
+    #[test]
+    fn test_base_either_or_iupac() {
+        // Test IUPAC combinations
+        assert!(matches!(
+            Base::either_or::<false>(Base::A, Base::G),
+            Base::R
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::G, Base::A),
+            Base::R
+        ));
+
+        assert!(matches!(
+            Base::either_or::<false>(Base::C, Base::T),
+            Base::Y
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::T, Base::C),
+            Base::Y
+        ));
+
+        assert!(matches!(
+            Base::either_or::<false>(Base::G, Base::C),
+            Base::S
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::C, Base::G),
+            Base::S
+        ));
+
+        assert!(matches!(
+            Base::either_or::<false>(Base::A, Base::T),
+            Base::W
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::T, Base::A),
+            Base::W
+        ));
+
+        assert!(matches!(
+            Base::either_or::<false>(Base::G, Base::T),
+            Base::K
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::T, Base::G),
+            Base::K
+        ));
+
+        assert!(matches!(
+            Base::either_or::<false>(Base::A, Base::C),
+            Base::M
+        ));
+        assert!(matches!(
+            Base::either_or::<false>(Base::C, Base::A),
+            Base::M
+        ));
+    }
+
+    #[test]
+    fn test_base_either_or_default_to_n() {
+        // When DEFAULT_TO_N is true, all non-identical should return N
+        assert!(matches!(Base::either_or::<true>(Base::A, Base::G), Base::N));
+        assert!(matches!(Base::either_or::<true>(Base::C, Base::T), Base::N));
+        assert!(matches!(Base::either_or::<true>(Base::G, Base::C), Base::N));
+
+        // Identical bases should still return themselves
+        assert!(matches!(Base::either_or::<true>(Base::A, Base::A), Base::A));
+        assert!(matches!(Base::either_or::<true>(Base::C, Base::C), Base::C));
+    }
+
+    #[test]
+    fn test_base_from_char() {
+        // Uppercase
+        assert!(matches!(Base::from('A'), Base::A));
+        assert!(matches!(Base::from('C'), Base::C));
+        assert!(matches!(Base::from('T'), Base::T));
+        assert!(matches!(Base::from('G'), Base::G));
+
+        // Lowercase
+        assert!(matches!(Base::from('a'), Base::A));
+        assert!(matches!(Base::from('c'), Base::C));
+        assert!(matches!(Base::from('t'), Base::T));
+        assert!(matches!(Base::from('g'), Base::G));
+
+        // U -> T
+        assert!(matches!(Base::from('U'), Base::T));
+        assert!(matches!(Base::from('u'), Base::T));
+
+        // Unknown -> N
+        assert!(matches!(Base::from('X'), Base::N));
+        assert!(matches!(Base::from('?'), Base::N));
+        assert!(matches!(Base::from('1'), Base::N));
+    }
+
+    #[test]
+    fn test_is_indel() {
+        assert!(is_indel(bam::pileup::Indel::Ins(1)));
+        assert!(is_indel(bam::pileup::Indel::Del(1)));
+        assert!(!is_indel(bam::pileup::Indel::None));
+    }
+
+    // Since we can't easily test the strategy functions that take Alignment parameters,
+    // we'll add integration tests with the actual BAM reading in pileup_position.rs
+
+    // Test that we can at least construct the types
+    #[test]
+    fn test_mate_resolution_construction() {
+        let res = MateResolution::new(Ordering::Greater, Some(Base::N));
+        assert_eq!(res.ordering, Ordering::Greater);
+        assert!(matches!(res.recommended_base, Some(Base::N)));
+    }
+
+    #[test]
+    fn test_mate_resolution_strategy_variants() {
+        // Just ensure all variants exist and can be created
+        let _ = MateResolutionStrategy::BaseQualMapQualFirstInPair;
+        let _ = MateResolutionStrategy::BaseQualMapQualIUPAC;
+        let _ = MateResolutionStrategy::BaseQualMapQualN;
+        let _ = MateResolutionStrategy::MapQualBaseQualFirstInPair;
+        let _ = MateResolutionStrategy::MapQualBaseQualIUPAC;
+        let _ = MateResolutionStrategy::MapQualBaseQualN;
+        let _ = MateResolutionStrategy::IUPAC;
+        let _ = MateResolutionStrategy::N;
+        let _ = MateResolutionStrategy::Original;
     }
 }
