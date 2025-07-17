@@ -1,6 +1,7 @@
 //! An implementation of `Position` for dealing with pileups.
 use crate::position::Position;
 use crate::read_filter::ReadFilter;
+use bstr::ByteSlice;
 use itertools::Itertools;
 use rust_htslib::bam::{
     self, HeaderView,
@@ -9,7 +10,7 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
-use std::default;
+use std::{collections::HashMap, default};
 
 use super::mate_fix::{self, Base, MateResolutionStrategy};
 
@@ -203,41 +204,60 @@ impl PileupPosition {
         let mut pos = Self::new(name, pileup.pos());
         pos.depth = pileup.depth();
 
-        // Group records by qname
-        let grouped_by_qname = pileup
+        // Group by umi
+        let grouped_by_umi = pileup
             .alignments()
             .map(|aln| {
                 let record = aln.record();
-                (aln, record)
+                let qname = record.qname();
+                let idx = qname.rfind_byte(b':').unwrap();
+                // TODO: smallvec
+                let umi = qname[idx + 1..qname.len()].to_vec();
+                (umi, aln, record)
             })
-            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
-            // TODO: I'm not sure there is a good way to remove this allocation
-            .group_by(|a| a.1.qname().to_owned());
+            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .group_by(|a| a.0.clone());
 
-        for (_qname, reads) in grouped_by_qname.into_iter() {
-            // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
-            let mut total_reads = 0; // count how many reads there were
+        for (umi, reads) in grouped_by_umi.into_iter() {
+            println!(
+                "Building concensus for umi: {:?}",
+                std::str::from_utf8(&umi).unwrap()
+            );
 
-            let mut reads = reads
-                .inspect(|_| total_reads += 1)
-                .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
-            let best = &reads.next().unwrap();
+            // So this UMI should get 1 vote
 
-            if let Some(second_best) = &reads.next().as_ref() {
-                // Deal explicitly with mate overlap, they are already ordered correctly
-                let result = mate_fix_strat.cmp(best, second_best, read_filter);
-                pos.depth -= total_reads - 1;
-                Self::update(
-                    &mut pos,
-                    &best.0,
-                    &best.1,
-                    read_filter,
-                    base_filter,
-                    result.recommended_base,
-                );
-            } else {
-                pos.depth -= total_reads - 1;
-                Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+            // Group records by qname
+            let grouped_by_qname = reads
+                .map(|(_umi, aln, rec)| (aln, rec))
+                .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
+                // TODO: I'm not sure there is a good way to remove this allocation
+                .group_by(|a| a.1.qname().to_owned());
+
+            for (qname, reads) in grouped_by_qname.into_iter() {
+                // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
+                let mut total_reads = 0; // count how many reads there were
+
+                let mut reads = reads
+                    .inspect(|_| total_reads += 1)
+                    .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
+                let best = &reads.next().unwrap();
+
+                if let Some(second_best) = &reads.next().as_ref() {
+                    // Deal explicitly with mate overlap, they are already ordered correctly
+                    let result = mate_fix_strat.cmp(best, second_best, read_filter);
+                    pos.depth -= total_reads - 1;
+                    Self::update(
+                        &mut pos,
+                        &best.0,
+                        &best.1,
+                        read_filter,
+                        base_filter,
+                        result.recommended_base,
+                    );
+                } else {
+                    pos.depth -= total_reads - 1;
+                    Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+                }
             }
         }
         pos
