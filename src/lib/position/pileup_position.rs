@@ -11,7 +11,7 @@ use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
 use std::default;
 
-use super::mate_fix::{self, Base, MateResolutionStrategy};
+use super::mate_fix::{Base, MateResolutionStrategy};
 
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32

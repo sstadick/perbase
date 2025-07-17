@@ -2,55 +2,47 @@
 //!
 //! The strategy here is as follows:
 //! - Always check first for the user-based filter status of each mate, if one fails, go with the other mate, if both fail, default to `a`
-//! - Try one of the [`MateResolutionStrategies`]
+//! - Try one of the [`MateResolutionStrategy`] variants
 //!
 //! ## MateResolutionStrategy::BaseQualMapQualFirstInPair
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else BASEQ -> MAPQ -> first in pair
 //!
 //! ## MateResolutionStrategy::BaseQualMapQualIUPAC
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else BASEQ -> MAPQ -> IAUPAC
 //!
 //! ## MateResolutionStrategy::BaseQualMapQualN
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else BASEQ -> MAPQ -> N
 //!
 //! ## MateResolutionStrategy::MapQualBaseQualFirstInPair
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else MAPQ -> BASEQ-> first in pair
 //!
 //! ## MateResolutionStrategy::MapQualBaseQualIUPAC
-//! If either is indel / not a base -> MAPQ -> first in pair
-//! Else MAPQ -> BASEQ -> IAUPAC
+//! If either is deletion / ref skip -> MAPQ -> first in pair
+//! Else MAPQ -> BASEQ -> IUPAC
 //!
-//! ## MateResolutionStrategy::BaseQualMapQualN
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! ## MateResolutionStrategy::MapQualBaseQualN
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else MAPQ -> BASEQ -> N
 //!
 //! ## MateResolutionStrategy::IUPAC
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else IUPAC
 //!
 //! ## MateResolutionStrategy::N
-//! If either is indel / not a base -> MAPQ -> first in pair
+//! If either is deletion / ref skip -> MAPQ -> first in pair
 //! Else N
 //!
 //! ## MateResolutionStrategy::Original
 //! MAPQ -> first in pair
 use crate::read_filter::ReadFilter;
-use rust_htslib::bam::{self, pileup::Alignment, record::Record};
+use rust_htslib::bam::{pileup::Alignment, record::Record};
 use strum::EnumString;
 
 use std::cmp::Ordering;
-
-#[inline]
-pub(crate) fn is_indel(indel: bam::pileup::Indel) -> bool {
-    matches!(
-        indel,
-        bam::pileup::Indel::Ins(_) | bam::pileup::Indel::Del(_)
-    )
-}
 
 /// IUPAC Bases
 #[derive(Copy, Clone, Debug)]
@@ -123,10 +115,16 @@ impl From<char> for Base {
     }
 }
 
+/// Result of mate resolution comparison containing ordering and optional base recommendation.
+///
+/// This struct represents the decision made when comparing two overlapping mate reads
+/// at the same genomic position. It contains both the ordering decision (which mate
+/// to prefer) and an optional base recommendation for ambiguous cases.
 #[derive(Debug, Copy, Clone)]
 pub struct MateResolution {
-    /// The ordering of a and b
+    /// The ordering of mate a relative to mate b (Greater = choose a, Less = choose b)
     pub(crate) ordering: Ordering,
+    /// Optional base recommendation for cases where both mates contribute to the final call
     pub(crate) recommended_base: Option<Base>,
 }
 
@@ -139,17 +137,84 @@ impl MateResolution {
     }
 }
 
+/// Strategies for resolving which mate to use when overlapping mates disagree on a base call.
+///
+/// All strategies first check user-based read filters. If one mate fails filters, the other
+/// is chosen. If both fail, the first mate is chosen by default.
+///
+/// For reads that are deletions / ref skips or lack a base call, all strategies fall back to the Original
+/// strategy (MAPQ → first in pair).
 #[derive(Debug, Copy, Clone, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum MateResolutionStrategy {
+    /// Base quality → MAPQ → first in pair
+    ///
+    /// Priority order:
+    /// 1. Higher base quality score wins
+    /// 2. If base qualities are equal, higher MAPQ wins  
+    /// 3. If both are equal, first mate in pair wins
     BaseQualMapQualFirstInPair,
+
+    /// Base quality → MAPQ → IUPAC ambiguity code
+    ///
+    /// Priority order:
+    /// 1. Higher base quality score wins
+    /// 2. If base qualities are equal, higher MAPQ wins
+    /// 3. If both are equal, return IUPAC ambiguity code (e.g., A+G→R)
     BaseQualMapQualIUPAC,
+
+    /// Base quality → MAPQ → N
+    ///
+    /// Priority order:
+    /// 1. Higher base quality score wins
+    /// 2. If base qualities are equal, higher MAPQ wins
+    /// 3. If both are equal, return N (unknown base)
     BaseQualMapQualN,
+
+    /// MAPQ → base quality → first in pair
+    ///
+    /// Priority order:
+    /// 1. Higher MAPQ wins
+    /// 2. If MAPQ is equal, higher base quality wins
+    /// 3. If both are equal, first mate in pair wins
     MapQualBaseQualFirstInPair,
+
+    /// MAPQ → base quality → IUPAC ambiguity code
+    ///
+    /// Priority order:
+    /// 1. Higher MAPQ wins
+    /// 2. If MAPQ is equal, higher base quality wins
+    /// 3. If both are equal, return IUPAC ambiguity code (e.g., A+G→R)
     MapQualBaseQualIUPAC,
+
+    /// MAPQ → base quality → N
+    ///
+    /// Priority order:
+    /// 1. Higher MAPQ wins
+    /// 2. If MAPQ is equal, higher base quality wins
+    /// 3. If both are equal, return N (unknown base)
     MapQualBaseQualN,
+
+    /// Always return IUPAC ambiguity code for different bases
+    ///
+    /// Returns the appropriate IUPAC code for the base combination:
+    /// - Same bases: return the base (A+A→A)
+    /// - Different bases: return IUPAC code (A+G→R, C+T→Y, etc.)
     IUPAC,
+
+    /// Always return N for different bases
+    ///
+    /// Returns N for different bases, but identical bases return themselves:
+    /// - Same bases: return the base (A+A→A)
+    /// - Different bases: return N
     N,
+
+    /// Original strategy: MAPQ → first in pair
+    ///
+    /// Priority order:
+    /// 1. Higher MAPQ wins
+    /// 2. If MAPQ is equal, first mate in pair wins
+    /// 3. If neither is marked as first in pair, choose first mate by default
     Original,
 }
 
@@ -411,95 +476,7 @@ impl MateResolutionStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read_filter::ReadFilter;
     use rust_htslib::bam::{self, record::Record};
-    use std::collections::HashMap;
-
-    // Mock ReadFilter for testing
-    struct MockReadFilter {
-        should_pass: HashMap<Vec<u8>, bool>,
-    }
-
-    impl MockReadFilter {
-        fn new() -> Self {
-            Self {
-                should_pass: HashMap::new(),
-            }
-        }
-
-        fn set_filter(&mut self, qname: &[u8], pass: bool) {
-            self.should_pass.insert(qname.to_vec(), pass);
-        }
-    }
-
-    impl ReadFilter for MockReadFilter {
-        fn filter_read(
-            &self,
-            record: &Record,
-            _alignment: Option<&bam::pileup::Alignment>,
-        ) -> bool {
-            self.should_pass
-                .get(record.qname())
-                .copied()
-                .unwrap_or(true)
-        }
-    }
-
-    // Helper to create a test record
-    fn create_test_record(
-        qname: &[u8],
-        flag: u16,
-        mapq: u8,
-        seq: &[u8],
-        qual: &[u8],
-        pos: i64,
-    ) -> Record {
-        let mut record = Record::new();
-        record.set_qname(qname);
-        record.set_flags(flag);
-        record.set_mapq(mapq);
-        record.set_pos(pos);
-
-        // Create a simple CIGAR string (all matches)
-        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(seq.len() as u32)]);
-        record.set(qname, Some(&cigar), seq, qual);
-
-        record
-    }
-
-    // Mock alignment for testing
-    struct MockAlignment {
-        qpos: Option<usize>,
-        is_del: bool,
-        is_refskip: bool,
-        indel: bam::pileup::Indel,
-    }
-
-    impl MockAlignment {
-        fn new(qpos: Option<usize>) -> Self {
-            Self {
-                qpos,
-                is_del: false,
-                is_refskip: false,
-                indel: bam::pileup::Indel::None,
-            }
-        }
-
-        fn with_indel(mut self, indel: bam::pileup::Indel) -> Self {
-            self.indel = indel;
-            self
-        }
-
-        fn with_deletion(mut self) -> Self {
-            self.is_del = true;
-            self
-        }
-
-        fn with_refskip(mut self) -> Self {
-            self.is_refskip = true;
-            self
-        }
-    }
 
     // Since we can't directly create Alignment objects, we need to work around this
     // by testing the internal functions directly
@@ -619,13 +596,6 @@ mod tests {
         assert!(matches!(Base::from('1'), Base::N));
     }
 
-    #[test]
-    fn test_is_indel() {
-        assert!(is_indel(bam::pileup::Indel::Ins(1)));
-        assert!(is_indel(bam::pileup::Indel::Del(1)));
-        assert!(!is_indel(bam::pileup::Indel::None));
-    }
-
     // Since we can't easily test the strategy functions that take Alignment parameters,
     // we'll add integration tests with the actual BAM reading in pileup_position.rs
 
@@ -638,6 +608,7 @@ mod tests {
     }
 
     // Helper function to create test BAM data and test a strategy
+    #[allow(clippy::too_many_arguments)]
     fn test_strategy_with_bam(
         strategy: MateResolutionStrategy,
         read1_seq: &[u8],
@@ -670,7 +641,7 @@ mod tests {
         let records = vec![
             Record::from_sam(
                 &view,
-                &format!(
+                format!(
                     "TESTPAIR\t{}\tchr1\t11\t{}\t10M\tchr1\t16\t30\t{}\t{}",
                     read1_flags,
                     read1_mapq,
@@ -682,7 +653,7 @@ mod tests {
             .unwrap(),
             Record::from_sam(
                 &view,
-                &format!(
+                format!(
                     "TESTPAIR\t{}\tchr1\t16\t{}\t10M\tchr1\t11\t30\t{}\t{}",
                     read2_flags,
                     read2_mapq,
