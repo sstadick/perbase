@@ -10,7 +10,7 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
-use std::{collections::HashMap, default};
+use std::{collections::HashMap, default, i32};
 
 use super::mate_fix::{self, Base, MateResolutionStrategy};
 
@@ -77,6 +77,150 @@ impl Position for PileupPosition {
 }
 
 impl PileupPosition {
+    fn collapse(&mut self) {
+        let mut i = i32::MAX;
+        let mut max = 0;
+        let mut total = 0;
+
+        total += self.a;
+        if self.a > max {
+            i = 0;
+            max = self.a;
+        }
+
+        total += self.c;
+        if self.c > max {
+            i = 1;
+            max = self.c
+        }
+
+        total += self.g;
+        if self.g > max {
+            i = 2;
+            max = self.g
+        }
+
+        total += self.t;
+        if self.t > max {
+            i = 3;
+            max = self.t
+        }
+
+        total += self.n;
+        if self.n > max {
+            i = 4;
+            max = self.n
+        }
+
+        total += self.r;
+        if self.r > max {
+            i = 5;
+            max = self.r
+        }
+
+        total += self.y;
+        if self.y > max {
+            i = 6;
+            max = self.y
+        }
+
+        total += self.s;
+        if self.s > max {
+            i = 7;
+            max = self.s
+        }
+
+        total += self.w;
+        if self.w > max {
+            i = 8;
+            max = self.w
+        }
+
+        total += self.k;
+        if self.k > max {
+            i = 9;
+            max = self.k
+        }
+
+        total += self.m;
+        if self.m > max {
+            i = 10;
+            max = self.m
+        }
+
+        total += self.ins;
+        if self.ins > max {
+            i = 11;
+            max = self.ins
+        }
+
+        total += self.del;
+        if self.del > max {
+            i = 12;
+            max = self.del
+        }
+
+        total += self.ref_skip;
+        if self.ref_skip > max {
+            i = 13;
+            max = self.ref_skip
+        }
+
+        total += self.fail;
+        if self.fail > max {
+            i = 14;
+            max = self.fail
+        }
+
+        let mut new = Self::new(self.ref_seq.clone(), self.pos);
+
+        total = 1;
+
+        match i {
+            0 => new.a = total,
+            1 => new.c = total,
+            2 => new.g = total,
+            3 => new.t = total,
+            4 => new.n = total,
+            5 => new.r = total,
+            6 => new.y = total,
+            7 => new.s = total,
+            8 => new.w = total,
+            9 => new.k = total,
+            10 => new.m = total,
+            11 => new.ins = total,
+            12 => new.del = total,
+            13 => new.ref_skip = total,
+            14 => new.fail = total,
+            _ => unreachable!(),
+        }
+        new.near_max_depth = self.near_max_depth;
+        if i != 13 || i != 14 {
+            new.depth = total
+        }
+        std::mem::swap(self, &mut new);
+    }
+
+    fn combine(&mut self, other: &Self) {
+        self.depth += other.depth;
+        self.a += other.a;
+        self.c += other.c;
+        self.g += other.g;
+        self.t += other.t;
+        self.n += other.n;
+        self.r += other.r;
+        self.y += other.y;
+        self.s += other.s;
+        self.w += other.w;
+        self.k += other.k;
+        self.m += other.m;
+        self.ins += other.ins;
+        self.del += other.del;
+        self.ref_skip += other.ref_skip;
+        self.fail += other.fail;
+        self.near_max_depth |= other.near_max_depth;
+    }
+
     /// Given a record, update the counts at this position
     #[inline(always)]
     fn update<F: ReadFilter>(
@@ -201,8 +345,8 @@ impl PileupPosition {
     ) -> Self {
         let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
-        let mut pos = Self::new(name, pileup.pos());
-        pos.depth = pileup.depth();
+        let mut pos = Self::new(name.clone(), pileup.pos());
+        // pos.depth = pileup.depth();
 
         // Group by umi
         let grouped_by_umi = pileup
@@ -211,7 +355,7 @@ impl PileupPosition {
                 let record = aln.record();
                 let qname = record.qname();
                 let idx = qname.rfind_byte(b':').unwrap();
-                // TODO: smallvec
+                // TODO: smallvec, or string since I htink i have smal string?
                 let umi = qname[idx + 1..qname.len()].to_vec();
                 (umi, aln, record)
             })
@@ -219,10 +363,7 @@ impl PileupPosition {
             .group_by(|a| a.0.clone());
 
         for (umi, reads) in grouped_by_umi.into_iter() {
-            println!(
-                "Building concensus for umi: {:?}",
-                std::str::from_utf8(&umi).unwrap()
-            );
+            let mut umi_pos = Self::new(name.clone(), pileup.pos());
 
             // So this UMI should get 1 vote
 
@@ -233,21 +374,16 @@ impl PileupPosition {
                 // TODO: I'm not sure there is a good way to remove this allocation
                 .group_by(|a| a.1.qname().to_owned());
 
-            for (qname, reads) in grouped_by_qname.into_iter() {
-                // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
-                let mut total_reads = 0; // count how many reads there were
-
+            for (_qname, reads) in grouped_by_qname.into_iter() {
                 let mut reads = reads
-                    .inspect(|_| total_reads += 1)
                     .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
                 let best = &reads.next().unwrap();
 
                 if let Some(second_best) = &reads.next().as_ref() {
                     // Deal explicitly with mate overlap, they are already ordered correctly
                     let result = mate_fix_strat.cmp(best, second_best, read_filter);
-                    pos.depth -= total_reads - 1;
                     Self::update(
-                        &mut pos,
+                        &mut umi_pos,
                         &best.0,
                         &best.1,
                         read_filter,
@@ -255,10 +391,19 @@ impl PileupPosition {
                         result.recommended_base,
                     );
                 } else {
-                    pos.depth -= total_reads - 1;
-                    Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+                    Self::update(
+                        &mut umi_pos,
+                        &best.0,
+                        &best.1,
+                        read_filter,
+                        base_filter,
+                        None,
+                    );
                 }
             }
+            // Now collapse the umi pos to a single value
+            umi_pos.collapse();
+            pos.combine(&umi_pos);
         }
         pos
     }
