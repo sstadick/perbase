@@ -71,8 +71,6 @@ chr1    709644  T       16      0       0       0       16      0       0       
 chr1    709645  G       16      0       0       16      0       0       0       0       0       0   false
 ```
 
-If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
-
 If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed an match the BAM/CRAM header of the input.
 
 The output can be compressed and indexed as follows:
@@ -84,7 +82,50 @@ tabix -S 1 -s 1 -b 2 -e 2 ./output.tsv.gz
 tabix output.tsv.gz chr1:5-10
 ```
 
-Usage:
+If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and resolve based on the `mate-resolution-strategy`, mates that are discarded are not counted toward `FAIL` or `DEPTH`.
+
+All strategies first check user-based read filters. If one mate fails filters, the other is chosen. If both fail, the first mate is chosen by default. For reads that are deletions / ref skips or lack a base call, all strategies fall back to the
+Original strategy (MAPQ → first in pair).
+
+| Strategy | Priority 1 | Priority 2 | Priority 3 (Tie-breaker) | Notes |
+|----------|------------|------------|--------------------------|-------|
+| **BaseQualMapQualFirstInPair** | Higher base quality | Higher MAPQ | First mate in pair | Standard quality-first approach |
+| **BaseQualMapQualIUPAC** | Higher base quality | Higher MAPQ | IUPAC code (e.g., A+G→R) | Returns ambiguity codes for ties |
+| **BaseQualMapQualN** | Higher base quality | Higher MAPQ | N (unknown base) | Conservative, marks ambiguous as N |
+| **MapQualBaseQualFirstInPair** | Higher MAPQ | Higher base quality | First mate in pair | Prioritizes mapping confidence |
+| **MapQualBaseQualIUPAC** | Higher MAPQ | Higher base quality | IUPAC code (e.g., A+G→R) | Mapping-first with ambiguity codes |
+| **MapQualBaseQualN** | Higher MAPQ | Higher base quality | N (unknown base) | Mapping-first, conservative |
+| **IUPAC** | — | — | IUPAC code | Always returns IUPAC code for different bases, same bases return themselves (A+A→A) |
+| **N** | — | — | N or base | Returns N for different bases, same bases return themselves (A+A→A) |
+| **Original** | Higher MAPQ | First mate in pair | First mate (default) | Simple MAPQ-based strategy |
+
+#### IUPAC Ambiguity Codes
+
+When IUPAC strategies are used, the following codes are returned for base combinations:
+
+| Base 1 | Base 2 | IUPAC Code | Meaning |
+|--------|--------|------------|---------|
+| A | G | R | puRine (A or G) |
+| C | T | Y | pYrimidine (C or T) |
+| G | C | S | Strong (G or C) |
+| A | T | W | Weak (A or T) |
+| G | T | K | Keto (G or T) |
+| A | C | M | aMino (A or C) |
+| Any | Same | Original | Identical bases return themselves |
+| Any | Other | N | Any combination not listed above |
+
+#### Strategy Selection Guide
+
+- **Use BaseQual strategies** when base quality is the most reliable indicator of accuracy
+- **Use MapQual strategies** when mapping quality is more trustworthy (e.g., repetitive regions)
+- **Use IUPAC variants** when you want to preserve ambiguity information for downstream analysis
+- **Use N variants** when you prefer conservative base calling
+- **Use FirstInPair variants** when you want deterministic results without ambiguity codes
+- **Use IUPAC/N strategies** when you don't trust quality scores and want base-only decisions
+- **Use Original** for backwards compatibility or simple MAPQ-based selection
+
+
+#### Usage:
 
 ```text
 Calculate the depth at each base, per-nucleotide

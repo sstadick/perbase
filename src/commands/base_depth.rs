@@ -8,7 +8,7 @@ use bio::io::fasta::IndexedReader;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{pileup_position::PileupPosition, Position},
+    position::{Position, mate_fix::MateResolutionStrategy, pileup_position::PileupPosition},
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
@@ -76,6 +76,10 @@ pub struct BaseDepth {
     #[structopt(long, short = "m")]
     mate_fix: bool,
 
+    /// If `mate_fix` is true, select the method to use for mate fixing.
+    #[structopt(long, short = "M", default_value = "original")]
+    mate_resolution_strategy: MateResolutionStrategy,
+
     /// Keep positions even if they have 0 depth.
     #[structopt(long, short = "k")]
     keep_zeros: bool,
@@ -129,6 +133,7 @@ impl BaseDepth {
             self.reads.clone(),
             self.ref_fasta.clone(),
             self.mate_fix,
+            self.mate_resolution_strategy,
             self.keep_zeros,
             if self.zero_base { 0 } else { 1 },
             read_filter,
@@ -170,6 +175,8 @@ struct BaseProcessor<F: ReadFilter> {
     ref_buffer: Option<reference::Buffer>,
     /// Indicate whether or not to account for overlapping mates.
     mate_fix: bool,
+    /// Strategy to use for mate fixing
+    mate_fix_strategy: MateResolutionStrategy,
     /// Indicate whether or not to keep postitions that have zero depth
     keep_zeros: bool,
     /// 0-based or 1-based coordiante output
@@ -190,6 +197,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
         mate_fix: bool,
+        mate_fix_strategy: MateResolutionStrategy,
         keep_zeros: bool,
         coord_base: u32,
         read_filter: F,
@@ -208,6 +216,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
             ref_fasta,
             ref_buffer,
             mate_fix,
+            mate_fix_strategy,
             keep_zeros,
             coord_base,
             read_filter,
@@ -259,6 +268,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                             &header,
                             &self.read_filter,
                             self.min_base_quality_score,
+                            self.mate_fix_strategy,
                         )
                     } else {
                         PileupPosition::from_pileup(
@@ -317,13 +327,13 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
 #[allow(unused)]
 mod tests {
     use super::*;
-    use perbase_lib::position::{pileup_position::PileupPosition, Position};
+    use perbase_lib::position::{Position, pileup_position::PileupPosition};
     use proptest::bits::u8;
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use smartstring::alias::*;
     use std::{collections::HashMap, path::PathBuf};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     #[fixture]
     fn read_filter() -> DefaultReadFilter {
@@ -392,7 +402,7 @@ mod tests {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
-                      // build the index
+        // build the index
         bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
         (path, tempdir)
     }
@@ -409,6 +419,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            MateResolutionStrategy::Original,
             false,
             1,
             read_filter,
@@ -452,6 +463,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            MateResolutionStrategy::Original,
             true, // keep-zeros
             1,
             read_filter,
@@ -495,6 +507,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            MateResolutionStrategy::Original,
             false,
             1,
             read_filter,
@@ -537,7 +550,8 @@ mod tests {
         let base_processor = BaseProcessor::new(
             bamfile.0.clone(),
             None,
-            false,// mate aware
+            false, // mate aware
+            MateResolutionStrategy::Original,
             true, // keep-zeros
             1,
             read_filter,
@@ -581,6 +595,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             false,
+            MateResolutionStrategy::Original,
             false,
             1,
             read_filter,
@@ -624,6 +639,7 @@ mod tests {
             bamfile.0.clone(),
             None,
             true, // mate aware
+            MateResolutionStrategy::Original,
             false,
             1,
             read_filter,
@@ -740,12 +756,24 @@ mod tests {
         keep_zeros,
         case::mate_unaware(non_mate_aware_positions(bamfile(), read_filter()), false),
         case::mate_aware(mate_aware_positions(bamfile(), read_filter()), false),
-        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1), false),
+        case::mate_unaware_bq(
+            non_mate_aware_positions_base_qual(bamfile(), read_filter(), 1),
+            false
+        ),
         case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 1), false),
-        case::mate_unaware_bq(non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3), false),
+        case::mate_unaware_bq(
+            non_mate_aware_positions_base_qual(bamfile(), read_filter(), 3),
+            false
+        ),
         case::mate_aware_bq(mate_aware_positions_base_qual(bamfile(), read_filter(), 3), false),
-        case::mate_unaware_keep_zeros(non_mate_aware_keep_zeros_positions(bamfile(), read_filter()), true),
-        case::mate_aware_keep_zeros(mate_aware_keep_zeros_positions(bamfile(), read_filter()), true),
+        case::mate_unaware_keep_zeros(
+            non_mate_aware_keep_zeros_positions(bamfile(), read_filter()),
+            true
+        ),
+        case::mate_aware_keep_zeros(
+            mate_aware_keep_zeros_positions(bamfile(), read_filter()),
+            true
+        )
     )]
     fn check_depths(positions: HashMap<String, Vec<PileupPosition>>, keep_zeros: bool) {
         assert_eq!(positions.get("chr1").unwrap()[0].depth, 1);
@@ -763,12 +791,12 @@ mod tests {
             // NB: -6 bc there are 6 positions with no coverage from 44-50
             assert_eq!(positions.get("chr1").unwrap()[78 - 6].depth, 4);
         } else {
-            // NB: with --keep-zeros then there should be no skipped loci 
+            // NB: with --keep-zeros then there should be no skipped loci
             assert_eq!(positions.get("chr1").unwrap().len(), 100);
 
             // NB: Since positions[0].pos == 1 for this test data: positions[i].pos == i+1
-            for (i,p) in positions.get("chr1").unwrap().iter().enumerate() {
-                assert_eq!(p.pos, (i+1).try_into().unwrap());
+            for (i, p) in positions.get("chr1").unwrap().iter().enumerate() {
+                assert_eq!(p.pos, (i + 1).try_into().unwrap());
             }
 
             assert_eq!(positions.get("chr1").unwrap()[43].depth, 1);
