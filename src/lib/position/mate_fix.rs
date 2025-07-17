@@ -637,17 +637,302 @@ mod tests {
         assert!(matches!(res.recommended_base, Some(Base::N)));
     }
 
+    // Helper function to create test BAM data and test a strategy
+    fn test_strategy_with_bam(
+        strategy: MateResolutionStrategy,
+        read1_seq: &[u8],
+        read1_qual: &[u8], 
+        read1_mapq: u8,
+        read1_flags: u16,
+        read2_seq: &[u8],
+        read2_qual: &[u8],
+        read2_mapq: u8,
+        read2_flags: u16,
+    ) -> MateResolution {
+        use rust_htslib::bam::{IndexedReader, Writer, index, HeaderView, Read};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("test.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = HeaderView::from_header(&header);
+
+        // Create overlapping mate pair 
+        // Read 1: positions 10-19 (1-based: 11-20)
+        // Read 2: positions 15-24 (1-based: 16-25)
+        // They overlap at positions 15-19 (1-based: 16-20)
+        let records = vec![
+            Record::from_sam(
+                &view,
+                &format!("TESTPAIR\t{}\tchr1\t11\t{}\t10M\tchr1\t16\t30\t{}\t{}", 
+                    read1_flags, read1_mapq, 
+                    std::str::from_utf8(read1_seq).unwrap(),
+                    std::str::from_utf8(read1_qual).unwrap()).as_bytes(),
+            ).unwrap(),
+            Record::from_sam(
+                &view,
+                &format!("TESTPAIR\t{}\tchr1\t16\t{}\t10M\tchr1\t11\t30\t{}\t{}", 
+                    read2_flags, read2_mapq,
+                    std::str::from_utf8(read2_seq).unwrap(), 
+                    std::str::from_utf8(read2_qual).unwrap()).as_bytes(),
+            ).unwrap(),
+        ];
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and test strategy at overlapping position
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        reader.fetch(("chr1", 15, 20)).unwrap(); // Fetch the overlapping region
+        let pileup_iter = reader.pileup();
+
+        let read_filter = crate::read_filter::DefaultReadFilter::new(0, 0, 0);
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() >= 15 && pileup.pos() < 20 { // Check overlapping positions
+                let alns: Vec<_> = pileup.alignments()
+                    .map(|aln| {
+                        let rec = aln.record();
+                        (aln, rec)
+                    })
+                    .collect();
+                
+                if alns.len() == 2 {
+                    return strategy.cmp(&alns[0], &alns[1], &read_filter);
+                }
+            }
+        }
+        
+        panic!("Failed to find overlapping reads at test position");
+    }
+
     #[test]
-    fn test_mate_resolution_strategy_variants() {
-        // Just ensure all variants exist and can be created
-        let _ = MateResolutionStrategy::BaseQualMapQualFirstInPair;
-        let _ = MateResolutionStrategy::BaseQualMapQualIUPAC;
-        let _ = MateResolutionStrategy::BaseQualMapQualN;
-        let _ = MateResolutionStrategy::MapQualBaseQualFirstInPair;
-        let _ = MateResolutionStrategy::MapQualBaseQualIUPAC;
-        let _ = MateResolutionStrategy::MapQualBaseQualN;
-        let _ = MateResolutionStrategy::IUPAC;
-        let _ = MateResolutionStrategy::N;
-        let _ = MateResolutionStrategy::Original;
+    fn test_base_qual_map_qual_first_in_pair() {
+        // Test different base qualities - higher base quality should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualFirstInPair,
+            b"AAAAAAAAAA", b"##########", 30, 67,  // First mate: A, qual 2, MAPQ 30, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Less); // Second mate wins due to higher base quality
+        assert!(result.recommended_base.is_none());
+
+        // Test equal base qualities, different MAPQ - higher MAPQ should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualFirstInPair,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 67,  // First mate: A, qual 30, MAPQ 40, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to higher MAPQ
+        assert!(result.recommended_base.is_none());
+
+        // Test equal base qualities and MAPQ - first in pair should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualFirstInPair,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to being first in pair
+        assert!(result.recommended_base.is_none());
+    }
+
+    #[test]
+    fn test_base_qual_map_qual_iupac() {
+        // Test different base qualities - higher base quality should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualIUPAC,
+            b"AAAAAAAAAA", b"##########", 30, 67,  // First mate: A, qual 2, MAPQ 30
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Less); // Second mate wins due to higher base quality
+        assert!(result.recommended_base.is_none());
+
+        // Test equal base qualities and MAPQ - should return IUPAC code
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualIUPAC,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30
+            b"GGGGGGGGGG", b">>>>>>>>>>", 30, 147, // Second mate: G, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Chooses first by default
+        assert!(matches!(result.recommended_base, Some(Base::R))); // A + G = R
+    }
+
+    #[test]
+    fn test_base_qual_map_qual_n() {
+        // Test different base qualities - higher base quality should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualN,
+            b"AAAAAAAAAA", b"##########", 30, 67,  // First mate: A, qual 2, MAPQ 30
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Less); // Second mate wins due to higher base quality
+        assert!(result.recommended_base.is_none());
+
+        // Test equal base qualities and MAPQ - should return N
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::BaseQualMapQualN,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Chooses first by default
+        assert!(matches!(result.recommended_base, Some(Base::N))); // Returns N
+    }
+
+    #[test]
+    fn test_map_qual_base_qual_first_in_pair() {
+        // Test different MAPQ - higher MAPQ should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualFirstInPair,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 67,  // First mate: A, qual 30, MAPQ 40
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to higher MAPQ
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ, different base qualities - higher base quality should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualFirstInPair,
+            b"AAAAAAAAAA", b"##########", 30, 67,  // First mate: A, qual 2, MAPQ 30
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Less); // Second mate wins due to higher base quality
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ and base qualities - first in pair should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualFirstInPair,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to being first in pair
+        assert!(result.recommended_base.is_none());
+    }
+
+    #[test]
+    fn test_map_qual_base_qual_iupac() {
+        // Test different MAPQ - higher MAPQ should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualIUPAC,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 67,  // First mate: A, qual 30, MAPQ 40
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to higher MAPQ
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ and base qualities - should return IUPAC code
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualIUPAC,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30
+            b"GGGGGGGGGG", b">>>>>>>>>>", 30, 147, // Second mate: G, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Chooses first by default
+        assert!(matches!(result.recommended_base, Some(Base::R))); // A + G = R
+    }
+
+    #[test]
+    fn test_map_qual_base_qual_n() {
+        // Test different MAPQ - higher MAPQ should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualN,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 67,  // First mate: A, qual 30, MAPQ 40
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to higher MAPQ
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ and base qualities - should return N
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::MapQualBaseQualN,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, qual 30, MAPQ 30
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, qual 30, MAPQ 30
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Chooses first by default
+        assert!(matches!(result.recommended_base, Some(Base::N))); // Returns N
+    }
+
+    #[test]
+    fn test_iupac_strategy() {
+        // Test with different bases - should return IUPAC code
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::IUPAC,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A
+            b"GGGGGGGGGG", b">>>>>>>>>>", 40, 147, // Second mate: G
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Always chooses first read for ordering
+        assert!(matches!(result.recommended_base, Some(Base::R))); // A + G = R
+
+        // Test with same bases - should return that base
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::IUPAC,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 147, // Second mate: A
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Always chooses first read for ordering
+        assert!(matches!(result.recommended_base, Some(Base::A))); // A + A = A
+    }
+
+    #[test]
+    fn test_n_strategy() {
+        // Test with different bases - should always return N
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::N,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A
+            b"CCCCCCCCCC", b">>>>>>>>>>", 40, 147, // Second mate: C
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Always chooses first read for ordering
+        assert!(matches!(result.recommended_base, Some(Base::N))); // Always N
+
+        // Test with same bases - should return the actual base since they're identical
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::N,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 147, // Second mate: A
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // Always chooses first read for ordering
+        assert!(matches!(result.recommended_base, Some(Base::A))); // Identical bases return themselves
+    }
+
+    #[test]
+    fn test_original_strategy() {
+        // Test different MAPQ - higher MAPQ should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::Original,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 40, 67,  // First mate: A, MAPQ 40, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to higher MAPQ
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ - first in pair should win
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::Original,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 67,  // First mate: A, MAPQ 30, first in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 147, // Second mate: C, MAPQ 30, second in pair
+        );
+        assert_eq!(result.ordering, Ordering::Greater); // First mate wins due to being first in pair
+        assert!(result.recommended_base.is_none());
+
+        // Test equal MAPQ, second read is first in pair
+        let result = test_strategy_with_bam(
+            MateResolutionStrategy::Original,
+            b"AAAAAAAAAA", b">>>>>>>>>>", 30, 147, // First mate: A, MAPQ 30, second in pair
+            b"CCCCCCCCCC", b">>>>>>>>>>", 30, 67,  // Second mate: C, MAPQ 30, first in pair
+        );
+        assert_eq!(result.ordering, Ordering::Less); // Second mate wins due to being first in pair
+        assert!(result.recommended_base.is_none());
     }
 }
