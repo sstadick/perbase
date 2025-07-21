@@ -22,6 +22,8 @@ Why `perbase` when so many other tools are out there? `perbase` leverages Rust's
 conda install -c bioconda perbase
 # OR
 cargo install perbase
+# OR
+brew install perbase
 ```
 
 You can also download a binary from the [releases](https://github.com/sstadick/perbase/releases) page.
@@ -39,12 +41,18 @@ The output columns are as follows:
 | REF            | The reference sequence name                                                                        |
 | POS            | The position on the reference sequence                                                             |
 | REF_BASE       | The reference base at the position, column excluded if no reference was supplied                   |
-| DEPTH          | The total depth at the position SUM(A, C, T, G, DEL)                                               |
+| DEPTH          | The total depth at the position SUM(A, C, T, G, N, R, Y, S, W, K, M, DEL)                          |
 | A              | Total A nucleotides seen at this position                                                          |
 | C              | Total C nucleotides seen at this position                                                          |
 | G              | Total G nucleotides seen at this position                                                          |
 | T              | Total T nucleotides seen at this position                                                          |
 | N              | Total N nucleotides seen at this position                                                          |
+| R              | Total R nucleotides seen at this position                                                          |
+| Y              | Total Y nucleotides seen at this position                                                          |
+| S              | Total S nucleotides seen at this position                                                          |
+| W              | Total W nucleotides seen at this position                                                          |
+| K              | Total K nucleotides seen at this position                                                          |
+| M              | Total M nucleotides seen at this position                                                          |
 | INS            | Total insertions that start at the base to the right of this position                              |
 | DEL            | Total deletions covering this position                                                             |
 | REF_SKIP       | Total reference skip operations covering this position                                             |
@@ -58,17 +66,16 @@ perbase base-depth ./test/test.bam
 Example output
 
 ```text
-REF     POS     REF_BASE        DEPTH   A       C       G       T       N       INS     DEL     REF_SKIP        FAIL    NEAR_MAX_DEPTH
-chr1    709636  T       16      0       0       0       16      0       0       0       0       0   false
-chr1    709637  T       16      0       4       0       12      0       0       0       0       0   false
-chr1    709638  A       16      16      0       0       0       0       0       0       0       0   false
-chr1    709639  G       16      0       0       16      0       0       0       0       0       0   false
-chr1    709640  A       16      16      0       0       0       0       0       0       0       0   false
-chr1    709641  A       16      16      0       0       0       0       0       0       0       0   false
-chr1    709642  G       16      0       0       16      0       0       0       0       0       0   false
-chr1    709643  G       16      0       0       16      0       0       0       0       0       0   false
-chr1    709644  T       16      0       0       0       16      0       0       0       0       0   false
-chr1    709645  G       16      0       0       16      0       0       0       0       0       0   false
+REF	POS	DEPTH	A	C	G	T	N	R	Y	S	W	K	M	INS	DEL	REF_SKIP	FAIL	NEAR_MAX_DEPTH
+chr1	1	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	2	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	3	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	4	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	5	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	6	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	7	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	8	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+chr1	9	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
 ```
 
 If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed an match the BAM/CRAM header of the input.
@@ -128,6 +135,8 @@ When IUPAC strategies are used, the following codes are returned for base combin
 #### Usage:
 
 ```text
+perbase-base-depth 0.10.3
+Seth Stadick <sstadick@gmail.com>
 Calculate the depth at each base, per-nucleotide
 
 USAGE:
@@ -147,7 +156,7 @@ FLAGS:
             Fix overlapping mates counts, see docs for full details
 
     -M, --skip-merging-intervals    
-            Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
+            Skip merging together regions specified in the optional BED or BCF/VCF files.
             
             **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
             may cause issues with downstream tooling.
@@ -177,11 +186,14 @@ OPTIONS:
     -T, --compression-threads <compression-threads>
             The number of threads to use for compressing output (specified by --bgzip) [default: 4]
 
-    -F, --exclude-flags <exclude-flags>                      
+    -F, --exclude-flags <exclude-flags>                          
             SAM flags to exclude, recommended 3848 [default: 0]
 
-    -f, --include-flags <include-flags>                      
+    -f, --include-flags <include-flags>                          
             SAM flags to include [default: 0]
+
+    -M, --mate-resolution-strategy <mate-resolution-strategy>
+            If `mate_fix` is true, select the method to use for mate fixing [default: original]
 
     -D, --max-depth <max-depth>
             Set the max depth for a pileup. If a positions depth is within 1% of max-depth the `NEAR_MAX_DEPTH` output
@@ -189,25 +201,26 @@ OPTIONS:
     -Q, --min-base-quality-score <min-base-quality-score>
             Minium base quality for a base to be counted toward [A, C, T, G]. If the base is less than the specified
             quality score it will instead be counted as an `N`. If nothing is set for this no cutoff will be applied
-    -q, --min-mapq <min-mapq>                                
+    -q, --min-mapq <min-mapq>
             Minimum MAPQ for a read to count toward depth [default: 0]
 
-    -o, --output <output>                                    
+    -o, --output <output>                                        
             Output path, defaults to stdout
 
         --ref-cache-size <ref-cache-size>
             Number of Reference Sequences to hold in memory at one time. Smaller will decrease mem usage [default: 10]
 
-    -r, --ref-fasta <ref-fasta>                              
+    -r, --ref-fasta <ref-fasta>                                  
             Indexed reference fasta, set if using CRAM
 
-    -t, --threads <threads>                                  
-            The number of threads to use [default: 32]
+    -t, --threads <threads>                                      
+            The number of threads to use [default: 10]
 
 
 ARGS:
     <reads>    
             Input indexed BAM/CRAM to analyze
+
 ```
 
 ### only-depth

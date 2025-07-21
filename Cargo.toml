@@ -1,6 +1,6 @@
 [package]
 name = "perbase"
-version = "0.10.3"
+version = "1.0.0"
 authors = ["Seth Stadick <sstadick@gmail.com>"]
 edition = "2024"
 license = "MIT"
