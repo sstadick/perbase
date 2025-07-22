@@ -3,14 +3,15 @@ use crate::position::Position;
 use crate::read_filter::ReadFilter;
 use itertools::Itertools;
 use rust_htslib::bam::{
-    self,
+    self, HeaderView,
     pileup::{Alignment, Pileup},
     record::Record,
-    HeaderView,
 };
 use serde::Serialize;
-use smartstring::{alias::String, LazyCompact, SmartString};
-use std::{cmp::Ordering, default};
+use smartstring::{LazyCompact, SmartString, alias::String};
+use std::default;
+
+use super::mate_fix::{Base, MateResolutionStrategy};
 
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
@@ -38,6 +39,18 @@ pub struct PileupPosition {
     pub t: u32,
     /// Number of N bases at this position. Any unrecognized base will be counted as an N.
     pub n: u32,
+    /// Number of bases that could be A or G
+    pub r: u32,
+    /// Number of bases that could be C or T
+    pub y: u32,
+    /// Number of bases that could be G or C
+    pub s: u32,
+    /// Number of bases that could be A or T
+    pub w: u32,
+    /// Number of bases that could be G or T
+    pub k: u32,
+    /// Number of bases that could be A or C
+    pub m: u32,
     /// Number of insertions that start to the right of this position.
     /// Does not count toward depth.
     pub ins: u32,
@@ -68,11 +81,12 @@ impl PileupPosition {
     fn update<F: ReadFilter>(
         &mut self,
         alignment: &Alignment,
-        record: Record,
+        record: &Record,
         read_filter: &F,
         base_filter: Option<u8>,
+        recommended_base: Option<Base>,
     ) {
-        if !read_filter.filter_read(&record, Some(alignment)) {
+        if !read_filter.filter_read(record, Some(alignment)) {
             self.depth -= 1;
             self.fail += 1;
             return;
@@ -88,25 +102,30 @@ impl PileupPosition {
             // We have an actual base!
 
             // Check if we are checking the base quality score
-            if let Some(base_qual_filter) = base_filter {
-                // Check if the base quality score is greater or equal to than the cutoff
-                // TODO: When `if let` + && / || stabilizes clean this up.
-                if record.qual()[alignment.qpos().unwrap()] < base_qual_filter {
-                    self.n += 1
-                } else {
-                    match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
-                        'A' => self.a += 1,
-                        'C' => self.c += 1,
-                        'T' => self.t += 1,
-                        'G' => self.g += 1,
-                        _ => self.n += 1,
-                    }
+            // && Check if the base quality score is greater or equal to than the cutoff
+            if let Some(base_qual_filter) = base_filter
+                && record.qual()[alignment.qpos().unwrap()] < base_qual_filter
+            {
+                self.n += 1
+            } else if let Some(b) = recommended_base {
+                match b {
+                    Base::A => self.a += 1,
+                    Base::C => self.c += 1,
+                    Base::T => self.t += 1,
+                    Base::G => self.g += 1,
+                    Base::R => self.r += 1,
+                    Base::Y => self.y += 1,
+                    Base::S => self.s += 1,
+                    Base::W => self.w += 1,
+                    Base::K => self.k += 1,
+                    Base::M => self.m += 1,
+                    _ => self.n += 1,
                 }
             } else {
                 match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
                     'A' => self.a += 1,
                     'C' => self.c += 1,
-                    'T' => self.t += 1,
+                    'T' | 'U' => self.t += 1,
                     'G' => self.g += 1,
                     _ => self.n += 1,
                 }
@@ -143,7 +162,14 @@ impl PileupPosition {
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
+            Self::update(
+                &mut pos,
+                &alignment,
+                &record,
+                read_filter,
+                base_filter,
+                None,
+            );
         }
         pos
     }
@@ -170,6 +196,7 @@ impl PileupPosition {
         header: &bam::HeaderView,
         read_filter: &F,
         base_filter: Option<u8>,
+        mate_fix_strat: MateResolutionStrategy,
     ) -> Self {
         let name = Self::compact_refseq(header, pileup.tid());
         // make output 1-based
@@ -190,32 +217,28 @@ impl PileupPosition {
         for (_qname, reads) in grouped_by_qname.into_iter() {
             // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
-            let (alignment, record) = reads
-                .into_iter()
-                .map(|x| {
-                    total_reads += 1;
-                    x
-                })
-                .max_by(|a, b| match a.1.mapq().cmp(&b.1.mapq()) {
-                    Ordering::Greater => Ordering::Greater,
-                    Ordering::Less => Ordering::Less,
-                    Ordering::Equal => {
-                        // Check if a is first in pair
-                        if a.1.flags() & 64 != 0 && read_filter.filter_read(&a.1, Some(&a.0)) {
-                            Ordering::Greater
-                        } else if b.1.flags() & 64 != 0 && read_filter.filter_read(&b.1, Some(&b.0))
-                        {
-                            Ordering::Less
-                        } else {
-                            // Default to `a` in the event that there is no first in pair for some reason
-                            Ordering::Greater
-                        }
-                    }
-                })
-                .unwrap();
-            // decrement depth for each read not used
-            pos.depth -= total_reads - 1;
-            Self::update(&mut pos, &alignment, record, read_filter, base_filter);
+
+            let mut reads = reads
+                .inspect(|_| total_reads += 1)
+                .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
+            let best = &reads.next().unwrap();
+
+            if let Some(second_best) = &reads.next().as_ref() {
+                // Deal explicitly with mate overlap, they are already ordered correctly
+                let result = mate_fix_strat.cmp(best, second_best, read_filter);
+                pos.depth -= total_reads - 1;
+                Self::update(
+                    &mut pos,
+                    &best.0,
+                    &best.1,
+                    read_filter,
+                    base_filter,
+                    result.recommended_base,
+                );
+            } else {
+                pos.depth -= total_reads - 1;
+                Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+            }
         }
         pos
     }
@@ -232,13 +255,14 @@ impl PileupPosition {
 mod tests {
     use super::*;
     use crate::read_filter::DefaultReadFilter;
-    use rust_htslib::bam::{self, record::Record, Read};
+    use rust_htslib::bam::{self, Read, record::Record};
+    use std::cmp::Ordering;
 
     /// Test that from_pileup_mate_aware chooses first mate when MAPQ scores are equal
     /// This verifies the fix for issue #82 by testing the actual function with overlapping mates
     #[test]
     fn test_from_pileup_mate_aware_chooses_first_mate() {
-        use rust_htslib::bam::{index, IndexedReader, Writer};
+        use rust_htslib::bam::{IndexedReader, Writer, index};
         use tempfile::tempdir;
 
         let tempdir = tempdir().unwrap();
@@ -303,6 +327,7 @@ mod tests {
                     &header_view,
                     &read_filter,
                     None,
+                    MateResolutionStrategy::Original,
                 );
 
                 // Should choose first mate's 'A' over second mate's 'C'
@@ -315,5 +340,240 @@ mod tests {
         }
 
         assert!(found_position, "Should have found pileup at position 14");
+    }
+
+    /// Test different MateResolutionStrategy behaviors
+    #[test]
+    fn test_mate_resolution_strategies() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("test.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Create overlapping mate pair with different base qualities and bases
+        // Position 14 (0-based): First mate has 'A' with quality 30, second mate has 'G' with quality 40
+        let records = vec![
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t67\tchr1\t10\t40\t10M\tchr1\t15\t30\tAAAAAAAAGA\t#########=",
+            )
+            .unwrap(),
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t147\tchr1\t15\t40\t10M\tchr1\t10\t30\tGGGGGGGGGG\t((((((((((",
+            )
+            .unwrap(),
+        ];
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and test different strategies
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let _header_view = reader.header().clone();
+
+        // Test position 19 (0-based) where mates overlap
+        reader.fetch(("chr1", 19, 20)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 19 {
+                // Test with different strategies
+                let strat = crate::position::mate_fix::MateResolutionStrategy::BaseQualMapQualIUPAC;
+
+                // Get alignments
+                let alns: Vec<_> = pileup
+                    .alignments()
+                    .map(|aln| {
+                        let rec = aln.record();
+                        (aln, rec)
+                    })
+                    .collect();
+
+                if alns.len() == 2 {
+                    // Test that higher base quality wins (second mate has quality 40)
+                    let result = strat.cmp(&alns[0], &alns[1], &read_filter);
+                    assert_eq!(
+                        result.ordering,
+                        Ordering::Less,
+                        "Second mate should win due to higher base quality"
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    /// Test IUPAC base resolution
+    #[test]
+    fn test_iupac_base_resolution() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("test.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Create overlapping mates with same quality but different bases
+        // Both have MAPQ 40 and base quality 30
+        let records = vec![
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t67\tchr1\t10\t40\t10M\tchr1\t15\t30\tAAAAAAAAAA\t>>>>>>>>>>",
+            )
+            .unwrap(),
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t147\tchr1\t15\t40\t10M\tchr1\t10\t30\tGGGGGGGGGG\t>>>>>>>>>>",
+            )
+            .unwrap(),
+        ];
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and test IUPAC strategy
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let _header_view = reader.header().clone();
+
+        reader.fetch(("chr1", 19, 20)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 19 {
+                let strat = crate::position::mate_fix::MateResolutionStrategy::BaseQualMapQualIUPAC;
+
+                let alns: Vec<_> = pileup
+                    .alignments()
+                    .map(|aln| {
+                        let rec = aln.record();
+                        (aln, rec)
+                    })
+                    .collect();
+
+                if alns.len() == 2 {
+                    // With equal qualities, should return IUPAC code
+                    let result = strat.cmp(&alns[0], &alns[1], &read_filter);
+                    // A + G should give R
+                    assert!(matches!(
+                        result.recommended_base,
+                        Some(crate::position::mate_fix::Base::R)
+                    ));
+                }
+                break;
+            }
+        }
+    }
+
+    /// Test N strategy
+    #[test]
+    fn test_n_strategy() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("test.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Create overlapping mates with same quality but different bases
+        let records = vec![
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t67\tchr1\t10\t40\t10M\tchr1\t15\t30\tCCCCCCCCCC\t>>>>>>>>>>",
+            )
+            .unwrap(),
+            Record::from_sam(
+                &view,
+                b"TESTPAIR\t147\tchr1\t15\t40\t10M\tchr1\t10\t30\tTTTTTTTTTT\t>>>>>>>>>>",
+            )
+            .unwrap(),
+        ];
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and test N strategy
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let _header_view = reader.header().clone();
+
+        reader.fetch(("chr1", 19, 20)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 19 {
+                let strat = crate::position::mate_fix::MateResolutionStrategy::N;
+
+                let alns: Vec<_> = pileup
+                    .alignments()
+                    .map(|aln| {
+                        let rec = aln.record();
+                        (aln, rec)
+                    })
+                    .collect();
+
+                if alns.len() == 2 {
+                    // N strategy should always return N for different bases
+                    let result = strat.cmp(&alns[0], &alns[1], &read_filter);
+                    assert!(matches!(
+                        result.recommended_base,
+                        Some(crate::position::mate_fix::Base::N)
+                    ));
+                }
+                break;
+            }
+        }
     }
 }

@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 1.0.0
+
+- Feat: expand mate-fix resolution strategies
+  - Adds new output columns for IUPAC bases, which are only used for some of the mate-fix resolution strats
+  - By default the "original" mate fix strat will be used and remains backward compatible
+
 ## 0.10.3
 
 - **Bugfix**: Fixed mate selection in `--mate-fix` to correctly prefer first mate over second mate when MAPQ scores are equal (issue #82)
