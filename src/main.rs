@@ -22,6 +22,8 @@ enum Subcommand {
     MergeAdjacent(merge_adjacent::MergeAdjacent),
 }
 
+impl Default for Subcommand {}
+
 impl Subcommand {
     fn run(self) -> Result<()> {
         match self {

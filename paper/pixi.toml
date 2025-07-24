@@ -2,13 +2,35 @@
 authors = ["Seth Stadick <sstadick@gmail.com>"]
 channels = ["conda-forge", "bioconda"]
 name = "perbase"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
+plot-benchmarks = "python plot_benchmarks_simple.py"
+generate-plots = "python plot_benchmarks_simple.py"
+
 
 [dependencies]
+hyperfine = ">=1.19.0,<2"
+aspera-cli = ">=4.20.0,<5"
+lftp = ">=4.9.3,<5"
+python = ">=3.11,<4"
+pandas = ">=2.2,<3"
+matplotlib = ">=3.8,<4"
+seaborn = ">=0.13,<0.14"
+numpy = ">=1.26,<2"
+
+[environments]
+bench = ["bench"]
+
+
+[feature.bench.dependencies]
 bam-readcount = ">=1.0.1,<2"
 samtools = ">=1.22,<2"
 sambamba = ">=1.0.1,<2"
 mosdepth = ">=0.3.11,<0.4"
+
+[feature.bench.tasks]
+subsample = "samtools view -b -s 12.75 -o ./data/ERR1395576_30X.bam ./data/ERR1395576.bam && samtools ./data/index ERR1395576_30X.bam"
+bench = "bash bench.sh"
+fetch-data = "bash ./fetch_data.sh"
