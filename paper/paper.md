@@ -1,67 +1,95 @@
 ---
-title: 'perbase: A highly parallelized per-base sequencing metrics tool'
+title: 'perbase: A performant per-base sequencing metrics toolkit with accurate handling of complex alignments'
 tags:
   - rust
   - bioinformatics
   - genomics
   - sequencing
-  - depth analysis
-  - parallel computing
+  - depth
 authors:
   - name: Seth Stadick
-    orcid: 0009-0002-0915-9459
-    equal-contrib: true
-    affiliation: "1" # (Multiple affiliations must be quoted)
+    orcid: 0000-0002-2183-1815
+    affiliation: 1
 affiliations:
- - name: Bio-Rad Laboratories, United States
+ - name: Institute for Genomic Medicine, Nationwide Children's Hospital, Columbus, OH 43205
    index: 1
-date: 14 July 2025
+date: 15 January 2025
 bibliography: paper.bib
-
 ---
 
 # Summary
 
-`perbase` is a highly parallelized command-line tool for calculating per-base sequencing metrics from BAM/CRAM files. Built in Rust, it leverages concurrent processing to deliver orders of magnitude faster performance than existing tools while maintaining accuracy. The tool provides unbiased base counting by directly reporting observed bases without modification or filtering beyond user specifications. `perbase` includes utilities for depth calculation, nucleotide counting at each position, and specialized features like mate-overlap correction, making it suitable for applications ranging from variant calling to coverage analysis in whole genome sequencing projects.
+`perbase` is a command-line toolkit for calculating per-base sequencing metrics from alignment files (BAM/CRAM). The primary tool, `base-depth`, provides comprehensive nucleotide-level information including depth, base composition, insertions, deletions, and quality metrics at each genomic position. Built with Rust's concurrency system, `perbase` delivers performant processing of high-throughput sequencing data while maintaining correctness in complex genomic contexts such as overlapping mate pairs, deletions, and reference skips.
 
 # Statement of need
 
-Per-base sequencing metrics are fundamental to genomic analyses, from variant calling to coverage assessment. Existing tools like `sambamba depth` [@Tarasov2015], `samtools depth` [@Li2009], `mosdepth` [@Pedersen2018], and `bam-readcount` [@Khanna2022] provide similar functionality but often lack the performance needed for modern high-throughput sequencing datasets. As sequencing depths increase and genome-scale analyses become routine, computational efficiency becomes critical.
+Per-base sequencing metrics are fundamental to genomic analyses, from variant calling to coverage assessment. Existing tools like `sambamba depth` [@Tarasov2015], `samtools depth` [@Li2009], `mosdepth` [@Pedersen2018], and `bam-readcount` [@Khanna2022] provide similar functionality but may differ in their handling of specific alignment features. As sequencing datasets grow larger, there is a need for tools that combine performance with correct handling of edge cases. 
 
-`perbase` addresses this need through automatic parallelization over genomic regions. Unlike tools that process data sequentially, `perbase` divides the genome into chunks and processes them concurrently, scaling performance with available compute resources. This design enables processing of deep whole genome sequencing data in minutes rather than hours.
+For instance, tools differ in how they calculate depth: `perbase` counts deletions (D in CIGAR) toward depth while `bam-readcount` does not; `perbase` correctly excludes reference skips (N in CIGAR) from depth while `sambamba` includes them. These distinctions matter for downstream analyses where accurate depth representation affects variant calling and coverage assessment.
 
-The tool provides accurate, unbiased metrics by counting all aligned bases including deletions toward depth, while correctly excluding reference skips. This differs from some tools: `bam-readcount` excludes deletions from depth calculations, while `sambamba` incorrectly includes reference skips. These distinctions matter for downstream analyses where accurate depth representation is critical.
+# Implementation
 
-# Implementation and Features
+`perbase` is implemented in Rust and uses a multi-threaded architecture where genomic regions are processed in parallel. The toolkit automatically scales with available CPU cores while maintaining bounded memory usage through configurable chunk sizes and message passing buffers.
 
-## Parallel Architecture
+## Core Features of base-depth
 
-`perbase` implements a sophisticated parallel processing system through its `ParGranges` module. The genome is divided into configurable chunks (default 1Mb), which are then distributed across worker threads using Rust's Rayon library. This zero-copy parallelization automatically scales with available CPU cores while maintaining memory efficiency through bounded channels sized proportionally to thread count.
+The `base-depth` tool walks over every position in the BAM/CRAM file and calculates:
 
-## Core Tools
+- **Depth**: Total count of A, C, G, T nucleotides plus deletions at each position
+- **Base composition**: Individual counts for A, C, G, T, and N nucleotides
+- **Insertions**: Count of insertions starting to the right of each position
+- **Deletions**: Count of deletions covering each position (included in depth)
+- **Reference skips**: Count of reference skip operations (not included in depth)
+- **Failed reads**: Count of reads failing user-specified filters at each position
+- **Quality filtering**: Bases below a minimum quality threshold are counted as N
+- **Near max depth flag**: Identifies positions within 1% of the specified maximum depth
 
-**base-depth**: Calculates depth and nucleotide composition at every position, outputting counts for A, C, G, T, N bases, insertions, deletions, reference skips, and reads failing filters. An optional `--mate-fix` flag handles overlapping mate pairs by selecting the mate with highest mapping quality, with ties broken by choosing the first mate. This prevents double-counting in paired-end data while preserving the most reliable base calls.
+### Mate-Pair Overlap Resolution
 
-**only-depth**: Provides rapid depth-only calculations with two modes. The default mode considers CIGAR operations (counting deletions but not reference skips), while `--fast-mode` uses only read start/stop positions for maximum speed. Adjacent positions with identical depth are automatically merged to reduce output size, inspired by the linear depth representation pioneered by `mosdepth` [@Pedersen2018].
+When the `--mate-fix` flag is enabled, `perbase` resolves overlapping mate pairs by selecting the mate with the highest mapping quality (MAPQ), breaking ties by choosing the first mate that passes filters. Discarded mates are not counted toward depth or failed read counts. This prevents double-counting while preserving the highest-confidence base calls.
 
-**merge-adjacent**: A utility for post-processing that merges adjacent intervals with the same depth, useful for creating compact representations of coverage landscapes.
+### Output Format
 
-## Performance
+The tool produces a tab-separated output with the following columns:
 
-Benchmarking on standard datasets demonstrates significant performance advantages. On a 30x whole genome sequencing dataset, `perbase` can process specific regions or generate genome-wide statistics faster than existing tools, with performance scaling nearly linearly with thread count. Memory usage remains modest even for high-coverage data, typically under 1GB for a 300x genome.
+| Column | Description |
+|--------|-------------|
+| REF | Reference sequence name |
+| POS | Position on the reference sequence |
+| REF_BASE | Reference base at the position (if reference supplied) |
+| DEPTH | Total depth: SUM(A, C, G, T, DEL) |
+| A, C, G, T, N | Count of each nucleotide |
+| INS | Insertions starting after this position |
+| DEL | Deletions covering this position |
+| REF_SKIP | Reference skips covering this position |
+| FAIL | Reads failing filters at this position |
+| NEAR_MAX_DEPTH | Flag if position is within 1% of max depth |
 
-# Research Applications
+## Additional Tools
 
-`perbase` has been designed for diverse genomic applications. In variant calling pipelines, the per-nucleotide counts enable sophisticated filtering and quality assessment. For structural variant detection, accurate depth profiles help identify copy number changes and deletions. The tool's speed makes it practical for real-time quality control during sequencing runs.
+**only-depth**: Provides rapid depth-only calculations. The design, inspired by `mosdepth` [@Pedersen2018], merges adjacent positions with identical depth to reduce output size. A `--fast-mode` option calculates depth using only read start/stop positions for maximum speed.
 
-The unbiased output facilitates method development and benchmarking. Researchers can access raw base counts without hidden filtering or transformations, enabling custom downstream analyses. The tool's ability to restrict analysis to specific regions via BED or VCF files supports targeted applications like exome or panel sequencing.
+**merge-adjacent**: A utility for merging adjacent intervals with the same depth value, useful for creating compact coverage representations.
 
-For benchmarking and validation, datasets like the Genome in a Bottle NA12878 reference [@Zook2019] or high-coverage 1000 Genomes Project data [@Byrska2022] provide ideal test cases with known variants across varying depths. These resources allow users to validate `perbase` metrics against established truth sets.
+# Performance Evaluation
+
+To demonstrate performance, we benchmark `base-depth` against commonly used tools on a 30X whole genome sequencing dataset (HG00157 from the 1000 Genomes Project). The benchmark script processes the full genome and measures runtime and memory usage.
+
+![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes. perbase demonstrates 3.0x faster performance in standard mode and 2.3x faster performance in mate-fix mode.](outputs/benchmark_comparison.png)
+
+The results show that `perbase` significantly outperforms `sambamba` in both standard and mate-fix modes, with speed improvements of 3.0x and 2.3x respectively. This performance advantage is achieved through efficient parallelization and optimized memory access patterns.
+
+# Availability and Installation
+
+`perbase` is available through multiple channels:
+- Conda: `conda install -c bioconda perbase`
+- Cargo: `cargo install perbase`
+- Pre-compiled binaries from GitHub releases: https://github.com/sstadick/perbase/releases
+
+Source code is available at https://github.com/sstadick/perbase under the MIT license.
 
 # Acknowledgements
 
-We acknowledge the Rust programming language community and the authors of dependencies including rust-htslib, Rayon, and rust-lapper.
+We acknowledge the Rust bioinformatics community and the authors of key dependencies including rust-htslib.
 
 # References
-
-
