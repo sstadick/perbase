@@ -46,7 +46,24 @@ The `base-depth` tool walks over every position in the BAM/CRAM file and calcula
 
 ### Mate-Pair Overlap Resolution
 
-When the `--mate-fix` flag is enabled, `perbase` resolves overlapping mate pairs by selecting the mate with the highest mapping quality (MAPQ), breaking ties by choosing the first mate that passes filters. Discarded mates are not counted toward depth or failed read counts. This prevents double-counting while preserving the highest-confidence base calls.
+When the `--mate-fix` flag is enabled, `perbase` resolves overlapping mate pairs to prevent double-counting while preserving the highest-confidence base calls. The tool offers nine different resolution strategies, selectable via `--mate-resolution-strategy`:
+
+**Quality-based strategies:**
+- **BaseQualMapQualFirstInPair** (recommended): Prioritizes base quality, then MAPQ, then first mate
+- **MapQualBaseQualFirstInPair**: Prioritizes MAPQ, then base quality, then first mate
+- **Original** (default): Simple MAPQ-based selection, choosing first mate for ties
+
+**Ambiguity-preserving strategies:**
+- **BaseQualMapQualIUPAC**: Base quality prioritized, returns IUPAC codes for ties (e.g., A+G→R)
+- **MapQualBaseQualIUPAC**: MAPQ prioritized, returns IUPAC codes for ties
+- **IUPAC**: Ignores quality scores, always returns IUPAC codes for different bases
+
+**Conservative strategies:**
+- **BaseQualMapQualN**: Base quality prioritized, returns N for ties
+- **MapQualBaseQualN**: MAPQ prioritized, returns N for ties
+- **N**: Most conservative, returns N for any base differences
+
+These strategies provide fine-grained control over overlap resolution, allowing users to optimize for their specific analysis requirements and data characteristics.
 
 ### Output Format
 
@@ -75,9 +92,9 @@ The tool produces a tab-separated output with the following columns:
 
 To demonstrate performance, we benchmark `base-depth` against commonly used tools on a 30X whole genome sequencing dataset (HG00157 from the 1000 Genomes Project). The benchmark script processes the full genome and measures runtime and memory usage.
 
-![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes. perbase demonstrates 3.0x faster performance in standard mode and 2.3x faster performance in mate-fix mode.](outputs/benchmark_comparison.png)
+![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes. perbase demonstrates 3.0x faster performance in standard mode and 2.1x faster performance in mate-fix mode.](outputs/benchmark_comparison.png)
 
-The results show that `perbase` significantly outperforms `sambamba` in both standard and mate-fix modes, with speed improvements of 3.0x and 2.3x respectively. This performance advantage is achieved through efficient parallelization and optimized memory access patterns.
+The results show that `perbase` significantly outperforms `sambamba` in both standard and mate-fix modes, with speed improvements of 3.0x and 2.1x respectively. Performance across the nine mate-fix resolution strategies is remarkably consistent, with all methods completing within a 0.5-minute range (47.7-48.2 minutes), indicating that the algorithmic complexity of different resolution strategies has minimal impact on overall runtime. This performance advantage is achieved through efficient parallelization and optimized memory access patterns.
 
 # Availability and Installation
 

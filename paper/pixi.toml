@@ -6,8 +6,9 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
-plot-benchmarks = "python plot_benchmarks_simple.py"
-generate-plots = "python plot_benchmarks_simple.py"
+plot-benchmarks = "python plot_benchmarks_comprehensive.py"
+generate-plots = "python plot_benchmarks_comprehensive.py"
+plot-simple = "python plot_benchmarks_simple.py"
 
 
 [dependencies]
