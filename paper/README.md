@@ -35,3 +35,10 @@ This will create benchmark comparison plots in the `outputs` directory:
 
 The plots show the runtime performance comparison between perbase and sambamba for both standard and mate-fix modes.
 
+
+## Submission
+
+https://joss.readthedocs.io/en/latest/submitting.html
+- generate metadata
+- double check formatting
+- fill out submission
