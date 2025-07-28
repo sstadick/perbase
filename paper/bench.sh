@@ -27,17 +27,33 @@ bench_base_depth_with_mate_fix () {
 		'sambamba depth base -t $(nproc)  -F "" -m -o ./data/outputs/sambamba_depth_base_mate_fix_30x.tsv ./data/HG00157.final.bam'
 }
 
-
-# Only-depth comparison
-
-bench_only_depth () {
+bench_base_depth_with_mate_fix_new () {
 	hyperfine \
-		--export-csv ./data/outputs/bench_results_only_depth.csv \
-		--command-name "perbase only-depth 30X" \
-		'../target/release/perbase only-depth --bgzip -o ./data/outputs/perbase_only_depth_30x.tsv.gz ./data/HG00157.final.bam' \
-		--command-name "mosdepth 30X" \
-		'mosdepth -t $(nproc) ./data/outputs/mosdepth_30x ./data/HG00157.final.bam'
+		--runs 1 \
+		--export-csv ./data/outputs/bench_results_base_depth_mate_fix_new_v_old.csv \
+		--command-name "perbase base-depth mate-fix 30X Original" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy Original -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X N" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy N -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X IUPAC" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy IUPAC -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X MapQualBaseQualN" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy MapQualBaseQualN -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X MapQualBaseQualIUPAC" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy MapQualBaseQualIUPAC -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X MapQualBaseQualFirstInPair" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy MapQualBaseQualFirstInPair -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X BaseQualMapQualN" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy BaseQualMapQualN -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X BaseQualMapQualIUPAC" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy BaseQualMapQualIUPAC -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X BaseQualMapQualFirstInPair" \
+		'../../temp/perbase/target/release/perbase base-depth -m --mate-resolution-strategy BaseQualMapQualFirstInPair -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "perbase base-depth mate-fix 30X OLD" \
+		'../target/release/perbase base-depth -m -o ./data/outputs/perbase_base_depth_mate_fix_30x.tsv ./data/HG00157.final.bam' \
+		--command-name "sambamba depth base mate-fix 30X" \
+		'sambamba depth base -t $(nproc)  -F "" -m -o ./data/outputs/sambamba_depth_base_mate_fix_30x.tsv ./data/HG00157.final.bam'
 }
 
-#bench_base_depth_with_mate_fix
-bench_only_depth
+
+bench_base_depth_with_mate_fix_new
