@@ -8,13 +8,13 @@ use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::{
-        range_positions::{BedFormatRangePositions, RangePositions},
         Position,
+        range_positions::{BedFormatRangePositions, RangePositions},
     },
     read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
-use rust_htslib::{bam, bam::ext::BamRecordExtensions, bam::record::Cigar, bam::Read};
+use rust_htslib::{bam, bam::Read, bam::ext::BamRecordExtensions, bam::record::Cigar};
 use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
 use std::{collections::HashMap, path::PathBuf};
@@ -535,14 +535,14 @@ impl Iterator for IterAlignedBlocks {
 mod tests {
     use super::*;
     use perbase_lib::{
-        position::{range_positions::RangePositions, Position},
+        position::{Position, range_positions::RangePositions},
         read_filter::DefaultReadFilter,
     };
     use rstest::*;
     use rust_htslib::{bam, bam::record::Record};
     use smartstring::alias::*;
     use std::{collections::HashMap, path::PathBuf};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     #[fixture]
     fn read_filter() -> DefaultReadFilter {
@@ -641,7 +641,7 @@ mod tests {
             writer.write(record).expect("Wrote record");
         }
         drop(writer); // force it to flush so indexing can happen
-                      // build the index
+        // build the index
         bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
         (path, tempdir)
     }

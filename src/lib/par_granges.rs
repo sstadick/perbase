@@ -1,9 +1,9 @@
 //! # ParGranges
 //!
 //! Iterates over chunked genomic regions in parallel.
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bio::io::bed;
-use crossbeam::channel::{bounded, Receiver};
+use crossbeam::channel::{Receiver, bounded};
 use lazy_static::lazy_static;
 use log::*;
 use num_cpus;
@@ -214,9 +214,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                             std::cmp::min(chunk_start as u32 + serial_step_size, tid_end);
                         trace!(
                             "Batch Processing {}:{}-{}",
-                            tid_name,
-                            chunk_start,
-                            chunk_end
+                            tid_name, chunk_start, chunk_end
                         );
                         let (r, _) = rayon::join(
                             || {
@@ -533,7 +531,7 @@ mod test {
         }
     }
 
-    use crate::position::{pileup_position::PileupPosition, Position};
+    use crate::position::{Position, pileup_position::PileupPosition};
     use smartstring::SmartString;
     struct TestProcessor {}
     impl RegionProcessor for TestProcessor {

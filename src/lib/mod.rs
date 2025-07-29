@@ -120,7 +120,6 @@
 //! }
 //!```
 #![warn(missing_docs)]
-#![warn(rustdoc::missing_doc_code_examples)]
 pub mod par_granges;
 pub mod position;
 pub mod read_filter;

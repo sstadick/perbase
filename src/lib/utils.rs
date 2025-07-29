@@ -1,7 +1,7 @@
 //! General utility methods.
 use anyhow::{Error, Result};
 use grep_cli::stdout;
-use gzp::{deflate::Bgzf, BgzfSyncReader, Compression, ZBuilder};
+use gzp::{BgzfSyncReader, Compression, ZBuilder, deflate::Bgzf};
 use lazy_static::lazy_static;
 use log::{error, warn};
 use std::{
