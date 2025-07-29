@@ -110,10 +110,23 @@ To demonstrate performance, we benchmark `base-depth` against `sambamba` [@Taras
 The benchmark script processes the full genome and measures runtime and memory usage.
 
 ![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes.
-perbase demonstrates 3.0x faster performance in standard mode and 2.1x faster performance in mate-fix mode.](outputs/benchmark_comparison.png)
+perbase demonstrates 3.0x faster performance in standard mode and 2.1x faster performance in mate-fix mode (using BaseQualMapQualFirstInPair strategy).](outputs/benchmark_comparison.png)
 
 The results show that `perbase` significantly outperforms `sambamba` in both standard and mate-fix modes, with speed improvements of 3.0x and 2.1x respectively.
 Performance across the nine mate-fix resolution strategies is remarkably consistent, with all methods completing within a 0.5-minute range (47.7-48.2 minutes), indicating that the algorithmic complexity of different resolution strategies has minimal impact on overall runtime.
+
+| Mate-fix Strategy | Runtime (minutes) | Relative to Fastest |
+|-------------------|-------------------|---------------------|
+| BaseQualMapQualFirstInPair | 47.7 | 1.00x |
+| N | 47.7 | 1.00x |
+| Original | 47.7 | 1.00x |
+| BaseQualMapQualN | 47.8 | 1.00x |
+| MapQualBaseQualN | 47.9 | 1.00x |
+| IUPAC | 48.0 | 1.01x |
+| BaseQualMapQualIUPAC | 48.0 | 1.01x |
+| MapQualBaseQualIUPAC | 48.2 | 1.01x |
+| MapQualBaseQualFirstInPair | 48.2 | 1.01x |
+
 This performance advantage is achieved through efficient parallelization and optimized memory access patterns.
 
 # Availability and Installation
