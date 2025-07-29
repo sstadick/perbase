@@ -1,0 +1,23 @@
+{
+  "@context": "https://raw.githubusercontent.com/codemeta/codemeta/master/codemeta.jsonld",
+  "@type": "Code",
+  "author": [
+	  {
+          "@id": "http://orcid.org/0000-0002-3957-2474",
+          "@type": "Person",
+          "email": "sstadic@gmail.com",
+          "name": "Seth Stadick",
+          "affiliation": "Bio-Rad Laboratories"
+      }
+  ],
+  "identifier": "",
+  "codeRepository": "https://github.com/sstadick/perbase",
+  "datePublished": "2025-07-29",
+  "dateModified": "2025-07-29",
+  "dateCreated": "2025-07-29",
+  "description": "Per-base per-nucleotide depth analysis ",
+  "keywords": "rust, bioinformatics, genomics, sequencing, depth",
+  "license": "MIT",
+  "title": "perbase",
+  "version": "v1.0.0"
+}
