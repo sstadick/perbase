@@ -5,7 +5,7 @@ use perbase_lib::{
     position::pileup_position::PileupPosition,
     read_filter::ReadFilter,
 };
-use rust_htslib::bam::{self, pileup::Alignment, record::Record, Read};
+use rust_htslib::bam::{self, Read, pileup::Alignment, record::Record};
 use std::path::PathBuf;
 
 // To use ParGranges you will need to implement a [`RegionProcessor`](par_granges::RegionProcessor),
