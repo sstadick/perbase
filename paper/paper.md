@@ -8,12 +8,12 @@ tags:
   - depth
 authors:
   - name: Seth Stadick
-    orcid: 0000-0002-2183-1815
+    orcid: 0009-0002-0915-9459
     affiliation: 1
 affiliations:
- - name: Institute for Genomic Medicine, Nationwide Children's Hospital, Columbus, OH 43205
+ - name: Bio-Rad Laboratories
    index: 1
-date: 15 January 2025
+date: 29 July 2025
 bibliography: paper.bib
 ---
 
