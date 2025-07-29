@@ -107,7 +107,19 @@ The tool produces a tab-separated output with the following columns:
 # Performance Evaluation
 
 To demonstrate performance, we benchmark `base-depth` against `sambamba` [@Tarasov2015] on a 30X whole genome sequencing dataset (HG00157 from the 1000 Genomes Project [@1000GenomesConsortium2015], [@Byrska2022]).
-The benchmark script processes the full genome and measures runtime and memory usage.
+The benchmark script processes the full genome and measures runtime and memory usage using hyperfine [@Peter2023], a command-line benchmarking tool that performs multiple runs and provides statistical analysis.
+Benchmarks were performed on a system with an AMD Ryzen 9 3950X 16-Core Processor (32 threads) and 64 GB of RAM. Both tools used 32 threads for processing.
+
+The following commands were used for benchmarking:
+```bash
+# Standard mode
+perbase base-depth -t 32 -o output.tsv input.bam
+sambamba depth base -t 32 -F "" -o output.tsv input.bam
+
+# Mate-fix mode
+perbase base-depth -t 32 -m -o output.tsv input.bam
+sambamba depth base -t 32 -F "" -m -o output.tsv input.bam
+```
 
 ![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes.
 perbase demonstrates 3.0x faster performance in standard mode and 2.1x faster performance in mate-fix mode (using BaseQualMapQualFirstInPair strategy).](outputs/benchmark_comparison.png)
