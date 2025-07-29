@@ -106,7 +106,7 @@ The tool produces a tab-separated output with the following columns:
 
 # Performance Evaluation
 
-To demonstrate performance, we benchmark `base-depth` against `sambamba` [@Tarasov2015] on a 30X whole genome sequencing dataset (HG00157 from the 1000 Genomes Project [@1000GenomesConsortium2015]).
+To demonstrate performance, we benchmark `base-depth` against `sambamba` [@Tarasov2015] on a 30X whole genome sequencing dataset (HG00157 from the 1000 Genomes Project [@1000GenomesConsortium2015], [@Byrska2022]).
 The benchmark script processes the full genome and measures runtime and memory usage.
 
 ![Performance comparison between perbase and sambamba showing runtime in minutes for both standard and mate-fix modes.
