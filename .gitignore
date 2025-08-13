@@ -1,6 +1,7 @@
 /target
 /test
 /paper/data
+/paper/ref
 
 # pixi environments
 .pixi
