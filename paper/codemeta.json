@@ -13,11 +13,11 @@
   "identifier": "",
   "codeRepository": "https://github.com/sstadick/perbase",
   "datePublished": "2025-07-29",
-  "dateModified": "2025-07-29",
+  "dateModified": "2025-08-13",
   "dateCreated": "2025-07-29",
   "description": "Per-base per-nucleotide depth analysis ",
   "keywords": "rust, bioinformatics, genomics, sequencing, depth",
   "license": "MIT",
   "title": "perbase",
-  "version": "v1.0.0"
+  "version": "v1.1.0"
 }
