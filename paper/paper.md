@@ -13,7 +13,7 @@ authors:
 affiliations:
  - name: Bio-Rad Laboratories
    index: 1
-date: 29 July 2025
+date: 13 August 2025
 bibliography: paper.bib
 ---
 
@@ -66,8 +66,8 @@ The tool offers nine different resolution strategies, selectable via `--mate-res
 - **IUPAC**: Ignores quality scores, always returns IUPAC codes for different bases
 
 **Conservative strategies:**
-- **BaseQualMapQualN**: Base quality prioritized, returns N for ties
-- **MapQualBaseQualN**: MAPQ prioritized, returns N for ties
+- **BaseQualMapQualN**: Base quality prioritized, returns N for ties if bases are ambiguous
+- **MapQualBaseQualN**: MAPQ prioritized, returns N for ties if bases are ambiguous
 - **N**: Most conservative, returns N for any base differences
 
 All strategies first check user-based read filters.
