@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 1.1.0
+
+- Fix/Feat: For both MapQualBaseQualN and BaseQualMapQualN only resolve to N when the bases are ambiguous, otherwise return the consensus base.
+
 ## 1.0.0
 
 - Feat: expand mate-fix resolution strategies

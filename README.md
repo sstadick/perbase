@@ -57,6 +57,7 @@ The output columns are as follows:
 | DEL            | Total deletions covering this position                                                             |
 | REF_SKIP       | Total reference skip operations covering this position                                             |
 | FAIL           | Total reads failing filters that covered this position (their bases were not counted toward depth) |
+| COUNT_OF_MATE_RESOLUTIONS | Total number times that mate resolution needed to be done                               |
 | NEAR_MAX_DEPTH | Flag to indicate if this position came within 1% of the max depth specified                        |
 
 ```bash
@@ -66,16 +67,16 @@ perbase base-depth ./test/test.bam
 Example output
 
 ```text
-REF	POS	DEPTH	A	C	G	T	N	R	Y	S	W	K	M	INS	DEL	REF_SKIP	FAIL	NEAR_MAX_DEPTH
-chr1	1	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	2	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	3	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	4	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	5	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	6	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	7	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	8	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
-chr1	9	2	2	0	0	0	0	0	0	0	0	0	0	0	0	0	0	false
+REF     POS     DEPTH   A       C       G       T       N       R       Y       S       W       K       M       INS     DEL     REF_SKIP        FAIL    COUNT_OF_MATE_RESOUTIONS        NEAR_MAX_DEPTH
+chr1    1       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    2       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    3       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    4       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    5       2       2       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    6       2       2       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    7       2       2       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    8       2       2       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
+chr1    9       2       2       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
 ```
 
 If the `--mate-fix` flag is passed, each position will first check if there are any mate overlaps and choose the mate with the hightest MAPQ, breaking ties by choosing the first mate that passes filters. Mates that are discarded are not counted toward `FAIL` or `DEPTH`.
@@ -103,7 +104,7 @@ Original strategy (MAPQ → first in pair).
 | **BaseQualMapQualN** | Higher base quality | Higher MAPQ | N (unknown base) | Conservative, marks ambiguous as N |
 | **MapQualBaseQualFirstInPair** | Higher MAPQ | Higher base quality | First mate in pair | Prioritizes mapping confidence |
 | **MapQualBaseQualIUPAC** | Higher MAPQ | Higher base quality | IUPAC code (e.g., A+G→R) | Mapping-first with ambiguity codes |
-| **MapQualBaseQualN** | Higher MAPQ | Higher base quality | N (unknown base) | Mapping-first, conservative |
+| **MapQualBaseQualN** | Higher MAPQ | Higher base quality | N (unknown base) | Mapping-first, conservative, marks ambiguous as N |
 | **IUPAC** | — | — | IUPAC code | Always returns IUPAC code for different bases, same bases return themselves (A+A→A) |
 | **N** | — | — | N or base | Returns N for different bases, same bases return themselves (A+A→A) |
 | **Original** | Higher MAPQ | First mate in pair | First mate (default) | Simple MAPQ-based strategy |
