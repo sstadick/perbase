@@ -14,7 +14,7 @@
 //!
 //! ## MateResolutionStrategy::BaseQualMapQualN
 //! If either is deletion / ref skip -> MAPQ -> first in pair
-//! Else BASEQ -> MAPQ -> N
+//! Else BASEQ -> MAPQ -> N (if ambiguous)
 //!
 //! ## MateResolutionStrategy::MapQualBaseQualFirstInPair
 //! If either is deletion / ref skip -> MAPQ -> first in pair
@@ -26,7 +26,7 @@
 //!
 //! ## MateResolutionStrategy::MapQualBaseQualN
 //! If either is deletion / ref skip -> MAPQ -> first in pair
-//! Else MAPQ -> BASEQ -> N
+//! Else MAPQ -> BASEQ -> N (if ambiguous)
 //!
 //! ## MateResolutionStrategy::IUPAC
 //! If either is deletion / ref skip -> MAPQ -> first in pair
@@ -168,7 +168,7 @@ pub enum MateResolutionStrategy {
     /// Priority order:
     /// 1. Higher base quality score wins
     /// 2. If base qualities are equal, higher MAPQ wins
-    /// 3. If both are equal, return N (unknown base)
+    /// 3. If both are equal, return N (unknown base), if ambiguous
     BaseQualMapQualN,
 
     /// MAPQ → base quality → first in pair
@@ -192,7 +192,7 @@ pub enum MateResolutionStrategy {
     /// Priority order:
     /// 1. Higher MAPQ wins
     /// 2. If MAPQ is equal, higher base quality wins
-    /// 3. If both are equal, return N (unknown base)
+    /// 3. If both are equal, return N (unknown base), if ambiguous
     MapQualBaseQualN,
 
     /// Always return IUPAC ambiguity code for different bases
@@ -293,7 +293,12 @@ impl MateResolutionStrategy {
             Ordering::Equal => match a.1.mapq().cmp(&b.1.mapq()) {
                 Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                 Ordering::Less => MateResolution::new(Ordering::Less, None),
-                Ordering::Equal => MateResolution::new(Ordering::Greater, Some(Base::N)), // how to pass this back?
+                Ordering::Equal => {
+                    let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
+                    let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                    let base = Base::either_or::<true>(a_base, b_base);
+                    MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
+                }
             },
         }
     }
@@ -374,7 +379,12 @@ impl MateResolutionStrategy {
                 match a_qual.cmp(&b_qual) {
                     Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                     Ordering::Less => MateResolution::new(Ordering::Less, None),
-                    Ordering::Equal => MateResolution::new(Ordering::Greater, Some(Base::N)), // how to pass this back?
+                    Ordering::Equal => {
+                        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
+                        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                        let base = Base::either_or::<true>(a_base, b_base);
+                        MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
+                    }
                 }
             }
         }

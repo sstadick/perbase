@@ -60,6 +60,8 @@ pub struct PileupPosition {
     pub ref_skip: u32,
     /// Number of reads failing filters at this position.
     pub fail: u32,
+    /// Number of times a mate resolution was needed.
+    pub count_of_mate_resoutions: u32,
     /// Depth is within 1% of max_depth
     pub near_max_depth: bool,
 }
@@ -85,6 +87,7 @@ impl PileupPosition {
         read_filter: &F,
         base_filter: Option<u8>,
         recommended_base: Option<Base>,
+        mates_resolved: bool,
     ) {
         if !read_filter.filter_read(record, Some(alignment)) {
             self.depth -= 1;
@@ -135,6 +138,10 @@ impl PileupPosition {
                 self.ins += 1;
             }
         }
+
+        if mates_resolved {
+            self.count_of_mate_resoutions += 1;
+        }
     }
 
     /// Convert a pileup into a `Position`.
@@ -169,6 +176,7 @@ impl PileupPosition {
                 read_filter,
                 base_filter,
                 None,
+                false,
             );
         }
         pos
@@ -215,7 +223,6 @@ impl PileupPosition {
             .group_by(|a| a.1.qname().to_owned());
 
         for (_qname, reads) in grouped_by_qname.into_iter() {
-            // Choose the best of the reads based on mapq, if tied, check which is first and passes filters
             let mut total_reads = 0; // count how many reads there were
 
             let mut reads = reads
@@ -234,10 +241,19 @@ impl PileupPosition {
                     read_filter,
                     base_filter,
                     result.recommended_base,
+                    true,
                 );
             } else {
                 pos.depth -= total_reads - 1;
-                Self::update(&mut pos, &best.0, &best.1, read_filter, base_filter, None);
+                Self::update(
+                    &mut pos,
+                    &best.0,
+                    &best.1,
+                    read_filter,
+                    base_filter,
+                    None,
+                    false,
+                );
             }
         }
         pos
