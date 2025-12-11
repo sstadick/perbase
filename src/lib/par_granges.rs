@@ -87,10 +87,11 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
     /// * `merge_regions` - If `regions_bed` and or `regions_bcf` is specified, and this is true, merge any overlapping regions to avoid duplicate output.
     /// * `threads`- Optional threads to restrict the number of threads this process will use, defaults to all
     /// * `chunksize`- optional argument to change the default chunksize of 1_000_000. `chunksize` determines the number of bases
-    ///                each worker will get to work on at one time.
+    ///   each worker will get to work on at one time.
     /// * `channel_size_modifier`- Optional argument to modify the default size ration of the channel that `R::P` is sent on.
-    ///                 formula is: ((BYTES_INA_GIGABYTE * channel_size_modifier) * threads) / size_of(R::P)
+    ///   formula is: ((BYTES_INA_GIGABYTE * channel_size_modifier) * threads) / size_of(R::P)
     /// * `processor`- Something that implements [`RegionProcessor`](RegionProcessor)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -109,7 +110,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         };
 
         // Keep two around for main thread and thread running the pool
-        let threads = std::cmp::max(threads.checked_sub(2).unwrap_or(0), 1);
+        let threads = std::cmp::max(threads.saturating_sub(2), 1);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -198,10 +199,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 };
 
                 // The number positions to try to process in one batch
-                let serial_step_size = self
-                    .chunksize
-                    .checked_mul(self.threads as u32)
-                    .unwrap_or(u32::MAX); // aka superchunk
+                let serial_step_size = self.chunksize.saturating_mul(self.threads as u32); // aka superchunk
                 for (tid, intervals) in intervals.into_iter().enumerate() {
                     let tid: u32 = tid as u32;
                     let tid_end: u32 = header.target_len(tid).unwrap().try_into().unwrap();
@@ -210,8 +208,7 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                     let mut result = vec![];
                     for chunk_start in (0..tid_end).step_by(serial_step_size as usize) {
                         let tid_name = std::str::from_utf8(header.tid2name(tid)).unwrap();
-                        let chunk_end =
-                            std::cmp::min(chunk_start as u32 + serial_step_size, tid_end);
+                        let chunk_end = std::cmp::min(chunk_start + serial_step_size, tid_end);
                         trace!(
                             "Batch Processing {}:{}-{}",
                             tid_name, chunk_start, chunk_end
@@ -259,15 +256,15 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         for tid in 0..(header.target_count()) {
             let tid_len: u32 = header.target_len(tid).unwrap().try_into().unwrap();
             for start in (0..tid_len).step_by(chunksize as usize) {
-                let stop = std::cmp::min(start as u32 + chunksize, tid_len);
+                let stop = std::cmp::min(start + chunksize, tid_len);
                 intervals[tid as usize].push(Interval {
-                    start: start as u32,
-                    stop: stop,
+                    start,
+                    stop,
                     val: (),
                 });
             }
         }
-        Ok(intervals.into_iter().map(|ivs| Lapper::new(ivs)).collect())
+        Ok(intervals.into_iter().map(Lapper::new).collect())
     }
 
     /// Read a bed file into a vector of lappers with the index representing the TID

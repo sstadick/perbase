@@ -107,7 +107,8 @@ impl PileupPosition {
             // Check if we are checking the base quality score
             // && Check if the base quality score is greater or equal to than the cutoff
             if let Some(base_qual_filter) = base_filter
-                && (record.seq().is_empty() || record.qual()[alignment.qpos().unwrap()] < base_qual_filter)
+                && (record.seq().is_empty()
+                    || record.qual()[alignment.qpos().unwrap()] < base_qual_filter)
             {
                 self.n += 1
             } else if let Some(b) = recommended_base {
@@ -222,7 +223,7 @@ impl PileupPosition {
             })
             .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
             // TODO: I'm not sure there is a good way to remove this allocation
-            .group_by(|a| a.1.qname().to_owned());
+            .chunk_by(|a| a.1.qname().to_owned());
 
         for (_qname, reads) in grouped_by_qname.into_iter() {
             let mut total_reads = 0; // count how many reads there were
@@ -547,11 +548,8 @@ mod tests {
         .unwrap();
 
         // Read with empty SEQ at positions 10-35 - should count toward depth and N count
-        let empty_seq_record = Record::from_sam(
-            &view,
-            b"EMPTY_SEQ\t0\tchr1\t10\t40\t25M\t*\t0\t0\t*\t*",
-        )
-        .unwrap();
+        let empty_seq_record =
+            Record::from_sam(&view, b"EMPTY_SEQ\t0\tchr1\t10\t40\t25M\t*\t0\t0\t*\t*").unwrap();
 
         // Another normal read with 'G' bases at positions 15-40
         let normal_record2 = Record::from_sam(
@@ -584,10 +582,14 @@ mod tests {
         for pileup_result in pileup_iter {
             let pileup = pileup_result.unwrap();
             if pileup.pos() == 14 {
-                let position = PileupPosition::from_pileup(pileup, &header_view, &read_filter, None);
+                let position =
+                    PileupPosition::from_pileup(pileup, &header_view, &read_filter, None);
 
                 // Depth should include all 3 reads
-                assert_eq!(position.depth, 3, "Depth should be 3 (NORMAL + EMPTY_SEQ + NORMAL2)");
+                assert_eq!(
+                    position.depth, 3,
+                    "Depth should be 3 (NORMAL + EMPTY_SEQ + NORMAL2)"
+                );
 
                 // 'A' count from NORMAL read
                 assert_eq!(position.a, 1, "Should have 1 A from NORMAL read");
@@ -629,11 +631,8 @@ mod tests {
         .unwrap();
 
         // Read with empty SEQ
-        let empty_seq_record = Record::from_sam(
-            &view,
-            b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*",
-        )
-        .unwrap();
+        let empty_seq_record =
+            Record::from_sam(&view, b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*").unwrap();
 
         // Write BAM file
         let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
@@ -664,7 +663,10 @@ mod tests {
                 assert_eq!(position.depth, 2, "Depth should be 2");
 
                 // 'A' from NORMAL (quality 'I' = 40, passes filter)
-                assert_eq!(position.a, 1, "Should have 1 A from high-quality NORMAL read");
+                assert_eq!(
+                    position.a, 1,
+                    "Should have 1 A from high-quality NORMAL read"
+                );
 
                 // Empty SEQ read should be counted as N (regardless of base qual filter)
                 assert_eq!(position.n, 1, "Empty SEQ read should be counted as N");
@@ -699,11 +701,8 @@ mod tests {
         .unwrap();
 
         // Read with empty SEQ
-        let empty_seq_record = Record::from_sam(
-            &view,
-            b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*",
-        )
-        .unwrap();
+        let empty_seq_record =
+            Record::from_sam(&view, b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*").unwrap();
 
         // Write BAM file
         let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();

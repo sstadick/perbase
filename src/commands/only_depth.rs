@@ -147,7 +147,7 @@ impl OnlyDepth {
             self.bcf_file.clone(),
             !self.skip_merging_intervals,
             Some(cpus),
-            Some(self.chunksize.clone()),
+            Some(self.chunksize),
             Some(self.channel_size_modifier),
             processor,
         );
@@ -205,6 +205,7 @@ struct OnlyDepthProcessor<F: ReadFilter> {
 
 impl<F: ReadFilter> OnlyDepthProcessor<F> {
     /// Create a new OnlyDepthProcessor
+    #[allow(clippy::too_many_arguments)]
     fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -307,7 +308,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         for record in reader
             .rc_records()
             .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(&read, None))
+            .filter(|read| self.read_filter.filter_read(read, None))
             .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
         {
             let rec_start = u32::try_from(record.0).expect("check overflow");
@@ -396,7 +397,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         for record in reader
             .rc_records()
             .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(&read, None))
+            .filter(|read| self.read_filter.filter_read(read, None))
         {
             let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
             let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");

@@ -29,10 +29,10 @@ pub fn set_rayon_global_pools_size(size: usize) -> Result<()> {
 /// Check if err is a broken pipe.
 #[inline]
 pub fn is_broken_pipe(err: &Error) -> bool {
-    if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>() {
-        if io_err.kind() == io::ErrorKind::BrokenPipe {
-            return true;
-        }
+    if let Some(io_err) = err.root_cause().downcast_ref::<io::Error>()
+        && io_err.kind() == io::ErrorKind::BrokenPipe
+    {
+        return true;
     }
     false
 }

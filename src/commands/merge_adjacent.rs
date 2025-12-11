@@ -71,7 +71,7 @@ impl MergeAdjacent {
             };
             let mut curr_depth = first.depth;
 
-            while let Some(bedlike) = iter.next() {
+            for bedlike in iter {
                 if bedlike.depth == curr_depth
                     && curr_end >= bedlike.pos
                     && bedlike.ref_seq == curr_seq

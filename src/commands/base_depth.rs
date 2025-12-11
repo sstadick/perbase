@@ -193,6 +193,7 @@ struct BaseProcessor<F: ReadFilter> {
 
 impl<F: ReadFilter> BaseProcessor<F> {
     /// Create a new BaseProcessor
+    #[allow(clippy::too_many_arguments)]
     fn new(
         reads: PathBuf,
         ref_fasta: Option<PathBuf>,
@@ -252,10 +253,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         reader.fetch((tid, start, stop)).expect("Fetched a region");
         // Walk over pileups
         let mut pileup = reader.pileup();
-        pileup.set_max_depth(std::cmp::min(
-            i32::max_value().try_into().unwrap(),
-            self.max_depth,
-        ));
+        pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
         let result: Vec<PileupPosition> = pileup
             .flat_map(|p| {
                 let pileup = p.expect("Extracted a pileup");
