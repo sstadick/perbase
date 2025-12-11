@@ -31,8 +31,8 @@ impl ReadFilter for DefaultReadFilter {
     #[inline(always)]
     fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
         let flags = read.flags();
-        (!flags) & &self.include_flags == 0
-            && flags & &self.exclude_flags == 0
-            && &read.mapq() >= &self.min_mapq
+        (!flags) & self.include_flags == 0
+            && flags & self.exclude_flags == 0
+            && read.mapq() >= self.min_mapq
     }
 }
