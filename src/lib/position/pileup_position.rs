@@ -107,7 +107,7 @@ impl PileupPosition {
             // Check if we are checking the base quality score
             // && Check if the base quality score is greater or equal to than the cutoff
             if let Some(base_qual_filter) = base_filter
-                && record.qual()[alignment.qpos().unwrap()] < base_qual_filter
+                && (record.seq().is_empty() || record.qual()[alignment.qpos().unwrap()] < base_qual_filter)
             {
                 self.n += 1
             } else if let Some(b) = recommended_base {
@@ -124,6 +124,8 @@ impl PileupPosition {
                     Base::M => self.m += 1,
                     _ => self.n += 1,
                 }
+            } else if record.seq().is_empty() {
+                self.n += 1
             } else {
                 match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
                     'A' => self.a += 1,
