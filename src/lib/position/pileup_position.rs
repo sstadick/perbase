@@ -519,6 +519,235 @@ mod tests {
         }
     }
 
+    /// Test that reads with empty SEQ (represented as `*` in SAM format) are handled correctly
+    /// in the pileup code path used by base-depth. Empty SEQ reads should still count toward
+    /// depth, but their bases should be counted as N. This tests the fix for issue #91.
+    #[test]
+    fn test_empty_seq_pileup() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("empty_seq.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Create records including one with empty SEQ
+        // Normal read with 'A' bases at positions 1-25
+        let normal_record = Record::from_sam(
+            &view,
+            b"NORMAL\t0\tchr1\t1\t40\t25M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################",
+        )
+        .unwrap();
+
+        // Read with empty SEQ at positions 10-35 - should count toward depth and N count
+        let empty_seq_record = Record::from_sam(
+            &view,
+            b"EMPTY_SEQ\t0\tchr1\t10\t40\t25M\t*\t0\t0\t*\t*",
+        )
+        .unwrap();
+
+        // Another normal read with 'G' bases at positions 15-40
+        let normal_record2 = Record::from_sam(
+            &view,
+            b"NORMAL2\t0\tchr1\t15\t40\t25M\t*\t0\t0\tGGGGGGGGGGGGGGGGGGGGGGGGG\t#########################",
+        )
+        .unwrap();
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        writer.write(&normal_record).unwrap();
+        writer.write(&empty_seq_record).unwrap();
+        writer.write(&normal_record2).unwrap();
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and create pileup
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let header_view = reader.header().clone();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        // Test at position 14 (0-based) = position 15 (1-based)
+        // At this position: NORMAL (A), EMPTY_SEQ (*), NORMAL2 (G) = depth 3
+        reader.fetch(("chr1", 14, 15)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 14 {
+                let position = PileupPosition::from_pileup(pileup, &header_view, &read_filter, None);
+
+                // Depth should include all 3 reads
+                assert_eq!(position.depth, 3, "Depth should be 3 (NORMAL + EMPTY_SEQ + NORMAL2)");
+
+                // 'A' count from NORMAL read
+                assert_eq!(position.a, 1, "Should have 1 A from NORMAL read");
+
+                // 'G' count from NORMAL2 read
+                assert_eq!(position.g, 1, "Should have 1 G from NORMAL2 read");
+
+                // 'N' count from EMPTY_SEQ read (empty seq should be counted as N)
+                assert_eq!(position.n, 1, "Empty SEQ read should be counted as N");
+
+                break;
+            }
+        }
+    }
+
+    /// Test that reads with empty SEQ work correctly with base quality filtering.
+    /// When a base quality filter is set and SEQ is empty, the read should be counted as N.
+    #[test]
+    fn test_empty_seq_with_base_qual_filter() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("empty_seq_bq.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Normal read with high quality
+        let normal_record = Record::from_sam(
+            &view,
+            b"NORMAL\t0\tchr1\t1\t40\t25M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAA\tIIIIIIIIIIIIIIIIIIIIIIIII",
+        )
+        .unwrap();
+
+        // Read with empty SEQ
+        let empty_seq_record = Record::from_sam(
+            &view,
+            b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*",
+        )
+        .unwrap();
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        writer.write(&normal_record).unwrap();
+        writer.write(&empty_seq_record).unwrap();
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and create pileup with base quality filter
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let header_view = reader.header().clone();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        reader.fetch(("chr1", 0, 1)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 0 {
+                // With base quality filter of 20
+                let position =
+                    PileupPosition::from_pileup(pileup, &header_view, &read_filter, Some(20));
+
+                // Depth should include both reads
+                assert_eq!(position.depth, 2, "Depth should be 2");
+
+                // 'A' from NORMAL (quality 'I' = 40, passes filter)
+                assert_eq!(position.a, 1, "Should have 1 A from high-quality NORMAL read");
+
+                // Empty SEQ read should be counted as N (regardless of base qual filter)
+                assert_eq!(position.n, 1, "Empty SEQ read should be counted as N");
+
+                break;
+            }
+        }
+    }
+
+    /// Test that reads with empty SEQ work correctly in mate-aware pileup mode.
+    #[test]
+    fn test_empty_seq_mate_aware() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use tempfile::tempdir;
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("empty_seq_mate.bam");
+
+        // Create header
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        // Normal read
+        let normal_record = Record::from_sam(
+            &view,
+            b"NORMAL\t0\tchr1\t1\t40\t25M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAA\t#########################",
+        )
+        .unwrap();
+
+        // Read with empty SEQ
+        let empty_seq_record = Record::from_sam(
+            &view,
+            b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*",
+        )
+        .unwrap();
+
+        // Write BAM file
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        writer.write(&normal_record).unwrap();
+        writer.write(&empty_seq_record).unwrap();
+        drop(writer);
+
+        // Index the BAM file
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        // Read back and create pileup in mate-aware mode
+        let mut reader = IndexedReader::from_path(&bam_path).unwrap();
+        let header_view = reader.header().clone();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+
+        reader.fetch(("chr1", 0, 1)).unwrap();
+        let pileup_iter = reader.pileup();
+
+        for pileup_result in pileup_iter {
+            let pileup = pileup_result.unwrap();
+            if pileup.pos() == 0 {
+                let position = PileupPosition::from_pileup_mate_aware(
+                    pileup,
+                    &header_view,
+                    &read_filter,
+                    None,
+                    MateResolutionStrategy::Original,
+                );
+
+                // Depth should include both reads
+                assert_eq!(position.depth, 2, "Depth should be 2");
+
+                // 'A' from NORMAL read
+                assert_eq!(position.a, 1, "Should have 1 A from NORMAL read");
+
+                // Empty SEQ read should be counted as N
+                assert_eq!(position.n, 1, "Empty SEQ read should be counted as N");
+
+                break;
+            }
+        }
+    }
+
     /// Test N strategy
     #[test]
     fn test_n_strategy() {

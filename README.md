@@ -34,6 +34,8 @@ You can also download a binary from the [releases](https://github.com/sstadick/p
 
 The `base-depth` tool walks over every position in the BAM/CRAM file and calculates the depth, as well as the number of each nucleotide at the given position. Additionally, it counts the numbers of Ins/Dels at each position.
 
+**Note on empty SEQ records:** BAM records with empty SEQ fields (represented as `*` in SAM format) are handled gracefully. These reads still count toward depth, but since the actual nucleotide cannot be determined, they are counted as `N`.
+
 The output columns are as follows:
 
 | Column         | Description                                                                                        |
