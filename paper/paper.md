@@ -13,7 +13,7 @@ authors:
 affiliations:
  - name: Bio-Rad Laboratories
    index: 1
-date: 13 August 2025
+date: 20 January 2026
 bibliography: paper.bib
 ---
 
@@ -32,7 +32,7 @@ As sequencing datasets grow larger, there is a need for tools that combine perfo
 For instance, tools differ in how they calculate depth: `perbase` counts deletions (D in CIGAR) toward depth while `bam-readcount` does not; `perbase` correctly excludes reference skips (N in CIGAR) from depth while `sambamba` includes them.
 These distinctions matter for downstream analyses where accurate depth representation affects variant calling and coverage assessment.
 
-# Implementation
+# Software Design
 
 `perbase` is implemented in Rust and uses a multi-threaded architecture where genomic regions are processed in parallel.
 The toolkit automatically scales with available CPU cores while maintaining bounded memory usage through configurable chunk sizes and message passing buffers.
@@ -140,6 +140,14 @@ Performance across the nine mate-fix resolution strategies is remarkably consist
 | MapQualBaseQualFirstInPair | 48.2 | 1.01x |
 
 This performance advantage is achieved through efficient parallelization and optimized memory access patterns.
+
+# Research Impact Statement
+
+`perbase` has accumulated over 49,000 downloads from Bioconda and serves as a foundational dependency for downstream tools including pbr, which integrates perbase pileups with lua expressions. Community engagement is demonstrated through external issue reports and feature requests. The repository includes reproducible benchmark scripts and uses standardized 1000 Genomes Project test data to facilitate independent validation.
+
+# AI usage disclosure
+
+AI tools were used during development: GitHub Copilot for code review suggestions, and Claude Code for some issue triage, some test writing, and manuscript proofreading. All outputs were reviewed and validated by the author, who made all core design and architectural decisions.
 
 # Availability and Installation
 
