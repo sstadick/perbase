@@ -61,7 +61,7 @@ pub struct PileupPosition {
     /// Number of reads failing filters at this position.
     pub fail: u32,
     /// Number of times a mate resolution was needed.
-    pub count_of_mate_resoutions: u32,
+    pub count_of_mate_resolutions: u32,
     /// Depth is within 1% of max_depth
     pub near_max_depth: bool,
 }
@@ -143,7 +143,7 @@ impl PileupPosition {
         }
 
         if mates_resolved {
-            self.count_of_mate_resoutions += 1;
+            self.count_of_mate_resolutions += 1;
         }
     }
 

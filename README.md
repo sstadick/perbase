@@ -69,7 +69,7 @@ perbase base-depth ./test/test.bam
 Example output
 
 ```text
-REF     POS     DEPTH   A       C       G       T       N       R       Y       S       W       K       M       INS     DEL     REF_SKIP        FAIL    COUNT_OF_MATE_RESOUTIONS        NEAR_MAX_DEPTH
+REF     POS     DEPTH   A       C       G       T       N       R       Y       S       W       K       M       INS     DEL     REF_SKIP        FAIL    COUNT_OF_MATE_RESOLUTIONS        NEAR_MAX_DEPTH
 chr1    1       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
 chr1    2       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
 chr1    3       1       1       0       0       0       0       0       0       0       0       0       0       0       0       0       0       0       false
