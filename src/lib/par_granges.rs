@@ -131,6 +131,31 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         }
     }
 
+    /// Validate inputs before launching the processing threads to catch errors gracefully.
+    fn validate(&self) -> Result<()> {
+        let mut reader = IndexedReader::from_path(&self.reads)
+            .with_context(|| format!("Failed to open indexed BAM/CRAM: {:?}", self.reads))?;
+
+        if let Some(ref_fasta) = &self.ref_fasta {
+            reader
+                .set_reference(ref_fasta)
+                .with_context(|| format!("Failed to set reference: {:?}", ref_fasta))?;
+        }
+
+        if let Some(regions_bed) = &self.regions_bed
+            && !regions_bed.exists()
+        {
+            return Err(anyhow!("BED file does not exist: {:?}", regions_bed));
+        }
+
+        if let Some(regions_bcf) = &self.regions_bcf
+            && !regions_bcf.exists()
+        {
+            return Err(anyhow!("BCF/VCF file does not exist: {:?}", regions_bcf));
+        }
+        Ok(())
+    }
+
     /// Process each region.
     ///
     /// This method splits the sequences in the BAM/CRAM header into `chunksize` * `self.threads` regions (aka 'super chunks').
@@ -153,6 +178,9 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
             "Creating channel of length {:?} (* 120 bytes to get mem)",
             channel_size
         );
+
+        self.validate()?;
+
         let (snd, rxv) = bounded(channel_size);
         thread::spawn(move || {
             self.pool.install(|| {
