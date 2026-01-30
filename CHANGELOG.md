@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 1.3.0
+
+- [Fix](https://github.com/sstadick/perbase/pull/95): typo in `count_mate_resolutions` from @camlloyd 
+
 ## 1.2.0
 
 - Fix: Handle BAM records with empty SEQ fields (`*` in SAM format) in `base-depth`. Previously this would cause an out-of-bounds error. Now these reads still count toward depth, and their bases are counted as `N`. ([#92](https://github.com/sstadick/perbase/pull/92) by @ghuls)
