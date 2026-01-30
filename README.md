@@ -28,6 +28,14 @@ brew install perbase
 
 You can also download a binary from the [releases](https://github.com/sstadick/perbase/releases) page.
 
+### System dependencies
+
+The build scripts of some dependencies will need to compile `c` libraries.
+
+- `cmake`
+- `gcc`
+
+
 ## Tools
 
 ### base-depth
