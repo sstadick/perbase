@@ -4,6 +4,7 @@
 
 - [Fix](https://github.com/sstadick/perbase/pull/95): typo in `count_mate_resolutions` from @camlloyd 
 - [chore](https://github.com/sstadick/perbase/issues/98): added CONTRIBUTING.md per @mbhall88 suggestion
+- [fix](https://github.com/sstadick/perbase/issues/97): handle missing ref files gracefully
 
 ## 1.2.0
 
