@@ -5,10 +5,10 @@ use commands::*;
 use env_logger::Env;
 use log::*;
 use perbase_lib::utils;
-use structopt::StructOpt;
+use structopt::{StructOpt, clap::AppSettings};
 
 #[derive(StructOpt)]
-#[structopt(rename_all = "kebab-case", author, about)]
+#[structopt(rename_all = "kebab-case", author, about, global_settings = &[AppSettings::SubcommandRequiredElseHelp])]
 /// Commands for generating per-base analysis
 struct Args {
     #[structopt(subcommand)]

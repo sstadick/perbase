@@ -18,7 +18,7 @@ use std::{convert::TryInto, path::PathBuf, thread};
 
 const BYTES_INA_GIGABYTE: usize = 1024 * 1024 * 1024;
 
-/// A modifier to apply to the channel size formular that is (BYTES_INA_GIGABYTE * channel_size_modifier) * threads / size_of(R::P)
+/// A modifier to apply to the channel size formula that is (BYTES_INA_GIGABYTE * channel_size_modifier) * threads / size_of(R::P)
 /// 0.15 roughly corresponds to 1_000_000 PileupPosition objects per thread with some wiggle room.
 pub const CHANNEL_SIZE_MODIFIER: f64 = 0.15;
 

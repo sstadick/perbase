@@ -14,11 +14,11 @@ use perbase_lib::{
 };
 use rust_htslib::{bam, bam::Read};
 use std::{convert::TryInto, path::PathBuf};
-use structopt::StructOpt;
+use structopt::{StructOpt, clap::AppSettings};
 
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
-#[structopt(author)]
+#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
 pub struct BaseDepth {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
@@ -55,7 +55,7 @@ pub struct BaseDepth {
     #[structopt(long, short = "L", default_value = "2")]
     compression_level: u32,
 
-    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
+    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize. With defaults, expect ~0.5 GB per worker thread.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
 
@@ -77,7 +77,7 @@ pub struct BaseDepth {
     mate_fix: bool,
 
     /// If `mate_fix` is true, select the method to use for mate fixing.
-    #[structopt(long, short = "M", default_value = "original")]
+    #[structopt(long, default_value = "original")]
     mate_resolution_strategy: MateResolutionStrategy,
 
     /// Keep positions even if they have 0 depth.

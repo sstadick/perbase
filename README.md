@@ -236,6 +236,12 @@ ARGS:
 
 ```
 
+#### Memory Usage
+
+With default settings (`--chunksize 1000000`, `--channel-size-modifier 0.15`), expect approximately **0.5 GB per worker thread**.
+
+To reduce memory usage, decrease `--chunksize` or `--channel-size-modifier`, although it is recommended to stick with defaults if possible.
+
 ### only-depth
 
 The `only-depth` tool walks over the input BAM/CRAM file and calculates the depth over all positions specified by either a BED file or in the BAM/CRAM header. Adjacent positions that have the same depth will be merged together to form a non-inclusive range (see example output).
@@ -277,7 +283,7 @@ If a BED-like output is needed, `--bed-format -z` flags can be set, which will w
 Usage:
 
 ```text
-Calculate the only the depth at each base
+Calculate only the depth at each base
 
 USAGE:
     perbase only-depth [FLAGS] [OPTIONS] <reads>
@@ -360,6 +366,12 @@ ARGS:
             Input indexed BAM/CRAM to analyze
 ```
 
+#### Memory Usage
+
+With default settings (`--chunksize 1000000`, `--channel-size-modifier 0.001`), expect approximately **20 MB per worker thread**.
+
+To reduce memory usage, decrease `--chunksize`, although it is recommended to stick with defaults if possible.
+
 ## merge-adjacent
 
 `merge-adjacent` is a utility to merge overlapping regions in a BED-like file.
@@ -370,7 +382,7 @@ It will take a file with four columns and no header as long as the columns are l
 <contig>\t<start>\t<stop>\t<depth>\n
 ```
 
-Or it can take files with three columns with headers that are like
+Or it can take files with four columns with headers that are like
 
 ```text
 <REF|chrom>\t<POS|chromStart>\t<END|chromEnd>\t<DEPTH|COV>

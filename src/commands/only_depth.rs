@@ -19,11 +19,11 @@ use rust_lapper::{Interval, Lapper};
 use smartstring::alias::String;
 use std::{collections::HashMap, path::PathBuf};
 use std::{convert::TryFrom, rc::Rc};
-use structopt::StructOpt;
+use structopt::{StructOpt, clap::AppSettings};
 
-/// Calculate the only the depth at each base.
+/// Calculate only the depth at each base.
 #[derive(StructOpt)]
-#[structopt(author)]
+#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
 pub struct OnlyDepth {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
@@ -66,7 +66,7 @@ pub struct OnlyDepth {
     #[structopt(long, short = "L", default_value = "2")]
     compression_level: u32,
 
-    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize.
+    /// The ideal number of basepairs each worker receives. Total bp in memory at one time is (threads - 2) * chunksize. With defaults, expect ~20 MB per worker thread.
     #[structopt(long, short = "c", default_value=par_granges::CHUNKSIZE_STR.as_str())]
     chunksize: u32,
 

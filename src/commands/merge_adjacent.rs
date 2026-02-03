@@ -4,15 +4,15 @@ use perbase_lib::utils;
 use serde::{Deserialize, Serialize};
 use smartstring::alias::*;
 use std::path::PathBuf;
-use structopt::StructOpt;
+use structopt::{StructOpt, clap::AppSettings};
 
 /// Merge adjacent intervals that have the same depth. Input must be sorted like:
 /// `sort -k1,1 -k2,2n in.bed > in.sorted.bed`
 ///
-/// Generally accepts any file with no header tha is <chrom>\t<start>\t<stop>\t<depth>.
-/// The <stop> is optional. See documentation for explaination of headers that are accepted.
+/// Generally accepts any file with no header that is <chrom>\t<start>\t<stop>\t<depth>.
+/// The <stop> is optional. See documentation for explanation of headers that are accepted.
 #[derive(StructOpt)]
-#[structopt(author)]
+#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
 pub struct MergeAdjacent {
     /// Input bed-like file, defaults to STDIN.
     in_file: Option<PathBuf>,
