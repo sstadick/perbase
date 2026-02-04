@@ -8,7 +8,7 @@ use perbase_lib::utils;
 use structopt::{StructOpt, clap::AppSettings};
 
 #[derive(StructOpt)]
-#[structopt(rename_all = "kebab-case", author, about, global_settings = &[AppSettings::SubcommandRequiredElseHelp])]
+#[structopt(rename_all = "kebab-case", author, about, setting = AppSettings::SubcommandRequiredElseHelp)]
 /// Commands for generating per-base analysis
 struct Args {
     #[structopt(subcommand)]

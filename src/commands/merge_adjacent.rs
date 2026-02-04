@@ -12,7 +12,7 @@ use structopt::{StructOpt, clap::AppSettings};
 /// Generally accepts any file with no header that is <chrom>\t<start>\t<stop>\t<depth>.
 /// The <stop> is optional. See documentation for explanation of headers that are accepted.
 #[derive(StructOpt)]
-#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
+#[structopt(author, setting = AppSettings::ArgRequiredElseHelp)]
 pub struct MergeAdjacent {
     /// Input bed-like file, defaults to STDIN.
     in_file: Option<PathBuf>,
