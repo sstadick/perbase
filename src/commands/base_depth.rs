@@ -18,7 +18,7 @@ use structopt::{StructOpt, clap::AppSettings};
 
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
-#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
+#[structopt(author, setting = AppSettings::ArgRequiredElseHelp)]
 pub struct BaseDepth {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,

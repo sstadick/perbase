@@ -23,7 +23,7 @@ use structopt::{StructOpt, clap::AppSettings};
 
 /// Calculate only the depth at each base.
 #[derive(StructOpt)]
-#[structopt(author, global_settings = &[AppSettings::ArgRequiredElseHelp])]
+#[structopt(author, setting = AppSettings::ArgRequiredElseHelp)]
 pub struct OnlyDepth {
     /// Input indexed BAM/CRAM to analyze.
     reads: PathBuf,
