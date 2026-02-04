@@ -1,8 +1,12 @@
 # CHANGELOG
 
+## 1.4.0
+
+- [fix](https://github.com/sstadick/perbase/pull/104): properly parse args by revering global structopt setting from @chenrui333
+
 ## 1.3.0
 
-- [Fix](https://github.com/sstadick/perbase/pull/95): typo in `count_mate_resolutions` from @camlloyd
+- [fix](https://github.com/sstadick/perbase/pull/95): typo in `count_mate_resolutions` from @camlloyd
 - [chore](https://github.com/sstadick/perbase/issues/98): added CONTRIBUTING.md per @mbhall88 suggestion
 - [fix](https://github.com/sstadick/perbase/issues/97): handle missing ref files gracefully
 - [fix](https://github.com/sstadick/perbase/commit/76e38e6f8dc52dc3da9f87f1fa17391224ec35f8): many small typos, improved help messages, fixed conflicting short opts
