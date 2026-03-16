@@ -9,7 +9,7 @@ tags:
 authors:
   - name: Seth Stadick
     orcid: 0009-0002-0915-9459
-    affiliation: 1
+    affiliation: '1'
 affiliations:
  - name: Bio-Rad Laboratories, Hercules, CA, United States of America
    index: 1
