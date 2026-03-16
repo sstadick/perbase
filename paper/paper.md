@@ -11,8 +11,8 @@ authors:
     orcid: 0009-0002-0915-9459
     affiliation: 1
 affiliations:
- - name: Bio-Rad Laboratories, Hercules, United States of America
-   index: 
+ - name: Bio-Rad Laboratories, Hercules, CA, United States of America
+   index: 1
 date: 20 January 2026
 bibliography: paper.bib
 ---
