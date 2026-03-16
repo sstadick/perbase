@@ -12,6 +12,8 @@ A highly parallelized utility for analyzing metrics at a per-base level.
 
 If a metric is missing, or performance is lacking. Please file a bug/feature ticket in issues.
 
+Check out the [paper](https://joss.theoj.org/papers/10.21105/joss.09774)!
+
 ## Why?
 
 Why `perbase` when so many other tools are out there? `perbase` leverages Rust's concurrency system to automagically parallelize over your input regions. This leads to orders of magnitude faster runtimes that scale with the compute resources that you have available. Additionally, `perbase` aims to be more accurate than other tools. E.g.: `perbase` counts DELs toward depth, `bam-readcount` does not, `perbase` does not count REF_SKIPs toward depth, `sambamba` does.
@@ -35,7 +37,6 @@ The build scripts of some dependencies will need to compile `c` libraries.
 - `cmake`
 - `gcc`
 
-
 ## Tools
 
 ### base-depth
@@ -46,29 +47,29 @@ The `base-depth` tool walks over every position in the BAM/CRAM file and calcula
 
 The output columns are as follows:
 
-| Column         | Description                                                                                        |
-| -------------- | -------------------------------------------------------------------------------------------------- |
-| REF            | The reference sequence name                                                                        |
-| POS            | The position on the reference sequence                                                             |
-| REF_BASE       | The reference base at the position, column excluded if no reference was supplied                   |
-| DEPTH          | The total depth at the position SUM(A, C, T, G, N, R, Y, S, W, K, M, DEL)                          |
-| A              | Total A nucleotides seen at this position                                                          |
-| C              | Total C nucleotides seen at this position                                                          |
-| G              | Total G nucleotides seen at this position                                                          |
-| T              | Total T nucleotides seen at this position                                                          |
-| N              | Total N nucleotides seen at this position                                                          |
-| R              | Total R nucleotides seen at this position                                                          |
-| Y              | Total Y nucleotides seen at this position                                                          |
-| S              | Total S nucleotides seen at this position                                                          |
-| W              | Total W nucleotides seen at this position                                                          |
-| K              | Total K nucleotides seen at this position                                                          |
-| M              | Total M nucleotides seen at this position                                                          |
-| INS            | Total insertions that start at the base to the right of this position                              |
-| DEL            | Total deletions covering this position                                                             |
-| REF_SKIP       | Total reference skip operations covering this position                                             |
-| FAIL           | Total reads failing filters that covered this position (their bases were not counted toward depth) |
-| COUNT_OF_MATE_RESOLUTIONS | Total number times that mate resolution needed to be done                               |
-| NEAR_MAX_DEPTH | Flag to indicate if this position came within 1% of the max depth specified                        |
+| Column                    | Description                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| REF                       | The reference sequence name                                                                        |
+| POS                       | The position on the reference sequence                                                             |
+| REF_BASE                  | The reference base at the position, column excluded if no reference was supplied                   |
+| DEPTH                     | The total depth at the position SUM(A, C, T, G, N, R, Y, S, W, K, M, DEL)                          |
+| A                         | Total A nucleotides seen at this position                                                          |
+| C                         | Total C nucleotides seen at this position                                                          |
+| G                         | Total G nucleotides seen at this position                                                          |
+| T                         | Total T nucleotides seen at this position                                                          |
+| N                         | Total N nucleotides seen at this position                                                          |
+| R                         | Total R nucleotides seen at this position                                                          |
+| Y                         | Total Y nucleotides seen at this position                                                          |
+| S                         | Total S nucleotides seen at this position                                                          |
+| W                         | Total W nucleotides seen at this position                                                          |
+| K                         | Total K nucleotides seen at this position                                                          |
+| M                         | Total M nucleotides seen at this position                                                          |
+| INS                       | Total insertions that start at the base to the right of this position                              |
+| DEL                       | Total deletions covering this position                                                             |
+| REF_SKIP                  | Total reference skip operations covering this position                                             |
+| FAIL                      | Total reads failing filters that covered this position (their bases were not counted toward depth) |
+| COUNT_OF_MATE_RESOLUTIONS | Total number times that mate resolution needed to be done                                          |
+| NEAR_MAX_DEPTH            | Flag to indicate if this position came within 1% of the max depth specified                        |
 
 ```bash
 perbase base-depth ./test/test.bam
@@ -107,32 +108,32 @@ If the `--mate-fix` flag is passed, each position will first check if there are 
 All strategies first check user-based read filters. If one mate fails filters, the other is chosen. If both fail, the first mate is chosen by default. For reads that are deletions / ref skips or lack a base call, all strategies fall back to the
 Original strategy (MAPQ → first in pair).
 
-| Strategy | Priority 1 | Priority 2 | Priority 3 (Tie-breaker) | Notes |
-|----------|------------|------------|--------------------------|-------|
-| **BaseQualMapQualFirstInPair** | Higher base quality | Higher MAPQ | First mate in pair | Standard quality-first approach |
-| **BaseQualMapQualIUPAC** | Higher base quality | Higher MAPQ | IUPAC code (e.g., A+G→R) | Returns ambiguity codes for ties |
-| **BaseQualMapQualN** | Higher base quality | Higher MAPQ | N (unknown base) | Conservative, marks ambiguous as N |
-| **MapQualBaseQualFirstInPair** | Higher MAPQ | Higher base quality | First mate in pair | Prioritizes mapping confidence |
-| **MapQualBaseQualIUPAC** | Higher MAPQ | Higher base quality | IUPAC code (e.g., A+G→R) | Mapping-first with ambiguity codes |
-| **MapQualBaseQualN** | Higher MAPQ | Higher base quality | N (unknown base) | Mapping-first, conservative, marks ambiguous as N |
-| **IUPAC** | — | — | IUPAC code | Always returns IUPAC code for different bases, same bases return themselves (A+A→A) |
-| **N** | — | — | N or base | Returns N for different bases, same bases return themselves (A+A→A) |
-| **Original** | Higher MAPQ | First mate in pair | First mate (default) | Simple MAPQ-based strategy |
+| Strategy                       | Priority 1          | Priority 2          | Priority 3 (Tie-breaker) | Notes                                                                               |
+| ------------------------------ | ------------------- | ------------------- | ------------------------ | ----------------------------------------------------------------------------------- |
+| **BaseQualMapQualFirstInPair** | Higher base quality | Higher MAPQ         | First mate in pair       | Standard quality-first approach                                                     |
+| **BaseQualMapQualIUPAC**       | Higher base quality | Higher MAPQ         | IUPAC code (e.g., A+G→R) | Returns ambiguity codes for ties                                                    |
+| **BaseQualMapQualN**           | Higher base quality | Higher MAPQ         | N (unknown base)         | Conservative, marks ambiguous as N                                                  |
+| **MapQualBaseQualFirstInPair** | Higher MAPQ         | Higher base quality | First mate in pair       | Prioritizes mapping confidence                                                      |
+| **MapQualBaseQualIUPAC**       | Higher MAPQ         | Higher base quality | IUPAC code (e.g., A+G→R) | Mapping-first with ambiguity codes                                                  |
+| **MapQualBaseQualN**           | Higher MAPQ         | Higher base quality | N (unknown base)         | Mapping-first, conservative, marks ambiguous as N                                   |
+| **IUPAC**                      | —                   | —                   | IUPAC code               | Always returns IUPAC code for different bases, same bases return themselves (A+A→A) |
+| **N**                          | —                   | —                   | N or base                | Returns N for different bases, same bases return themselves (A+A→A)                 |
+| **Original**                   | Higher MAPQ         | First mate in pair  | First mate (default)     | Simple MAPQ-based strategy                                                          |
 
 #### IUPAC Ambiguity Codes
 
 When IUPAC strategies are used, the following codes are returned for base combinations:
 
-| Base 1 | Base 2 | IUPAC Code | Meaning |
-|--------|--------|------------|---------|
-| A | G | R | puRine (A or G) |
-| C | T | Y | pYrimidine (C or T) |
-| G | C | S | Strong (G or C) |
-| A | T | W | Weak (A or T) |
-| G | T | K | Keto (G or T) |
-| A | C | M | aMino (A or C) |
-| Any | Same | Original | Identical bases return themselves |
-| Any | Other | N | Any combination not listed above |
+| Base 1 | Base 2 | IUPAC Code | Meaning                           |
+| ------ | ------ | ---------- | --------------------------------- |
+| A      | G      | R          | puRine (A or G)                   |
+| C      | T      | Y          | pYrimidine (C or T)               |
+| G      | C      | S          | Strong (G or C)                   |
+| A      | T      | W          | Weak (A or T)                     |
+| G      | T      | K          | Keto (G or T)                     |
+| A      | C      | M          | aMino (A or C)                    |
+| Any    | Same   | Original   | Identical bases return themselves |
+| Any    | Other  | N          | Any combination not listed above  |
 
 #### Strategy Selection Guide
 
@@ -143,7 +144,6 @@ When IUPAC strategies are used, the following codes are returned for base combin
 - **Use FirstInPair variants** when you want deterministic results without ambiguity codes
 - **Use IUPAC/N strategies** when you don't trust quality scores and want base-only decisions
 - **Use Original** for backwards compatibility or simple MAPQ-based selection
-
 
 #### Usage:
 
@@ -156,27 +156,27 @@ USAGE:
     perbase base-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-    -Z, --bgzip                     
+    -Z, --bgzip
             Optionally bgzip the output
 
-    -h, --help                      
+    -h, --help
             Prints help information
 
-    -k, --keep-zeros                
+    -k, --keep-zeros
             Keep positions even if they have 0 depth
 
-    -m, --mate-fix                  
+    -m, --mate-fix
             Fix overlapping mates counts, see docs for full details
 
-    -M, --skip-merging-intervals    
+    -M, --skip-merging-intervals
             Skip merging together regions specified in the optional BED or BCF/VCF files.
-            
+
             **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
             may cause issues with downstream tooling.
-    -V, --version                   
+    -V, --version
             Prints version information
 
-    -z, --zero-base                 
+    -z, --zero-base
             Output positions as 0-based instead of 1-based
 
 
@@ -199,10 +199,10 @@ OPTIONS:
     -T, --compression-threads <compression-threads>
             The number of threads to use for compressing output (specified by --bgzip) [default: 4]
 
-    -F, --exclude-flags <exclude-flags>                          
+    -F, --exclude-flags <exclude-flags>
             SAM flags to exclude, recommended 3848 [default: 0]
 
-    -f, --include-flags <include-flags>                          
+    -f, --include-flags <include-flags>
             SAM flags to include [default: 0]
 
     -M, --mate-resolution-strategy <mate-resolution-strategy>
@@ -217,21 +217,21 @@ OPTIONS:
     -q, --min-mapq <min-mapq>
             Minimum MAPQ for a read to count toward depth [default: 0]
 
-    -o, --output <output>                                        
+    -o, --output <output>
             Output path, defaults to stdout
 
         --ref-cache-size <ref-cache-size>
             Number of Reference Sequences to hold in memory at one time. Smaller will decrease mem usage [default: 10]
 
-    -r, --ref-fasta <ref-fasta>                                  
+    -r, --ref-fasta <ref-fasta>
             Indexed reference fasta, set if using CRAM
 
-    -t, --threads <threads>                                      
+    -t, --threads <threads>
             The number of threads to use [default: 10]
 
 
 ARGS:
-    <reads>    
+    <reads>
             Input indexed BAM/CRAM to analyze
 
 ```
@@ -289,36 +289,36 @@ USAGE:
     perbase only-depth [FLAGS] [OPTIONS] <reads>
 
 FLAGS:
-        --bed-format                
+        --bed-format
             Output BED-like output format with the depth in the 5th column. Note, `-z` can be used with this to change
             coordinates to 0-based to be more BED-like
-    -Z, --bgzip                     
+    -Z, --bgzip
             Optionally bgzip the output
 
-    -x, --fast-mode                 
+    -x, --fast-mode
             Calculate depth based only on read starts/stops, see docs for full details
 
-    -h, --help                      
+    -h, --help
             Prints help information
 
-    -k, --keep-zeros                
+    -k, --keep-zeros
             Keep positions even if they have 0 depth
 
-    -m, --mate-fix                  
+    -m, --mate-fix
             Fix overlapping mates counts, see docs for full details
 
-    -n, --no-merge                  
+    -n, --no-merge
             Skip merging adjacent bases that have the same depth
 
-    -M, --skip-merging-intervals    
+    -M, --skip-merging-intervals
             Skip mergeing togther regions specified in the optional BED or BCF/VCF files.
-            
+
             **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
             may cause issues with downstream tooling.
-    -V, --version                   
+    -V, --version
             Prints version information
 
-    -z, --zero-base                 
+    -z, --zero-base
             Output positions as 0-based instead of 1-based
 
 
@@ -342,27 +342,27 @@ OPTIONS:
     -T, --compression-threads <compression-threads>
             The number of threads to use for compressing output (specified by --bgzip) [default: 4]
 
-    -F, --exclude-flags <exclude-flags>                    
+    -F, --exclude-flags <exclude-flags>
             SAM flags to exclude, recommended 3848 [default: 0]
 
-    -f, --include-flags <include-flags>                    
+    -f, --include-flags <include-flags>
             SAM flags to include [default: 0]
 
-    -q, --min-mapq <min-mapq>                              
+    -q, --min-mapq <min-mapq>
             Minimum MAPQ for a read to count toward depth [default: 0]
 
-    -o, --output <output>                                  
+    -o, --output <output>
             Output path, defaults to stdout
 
-    -r, --ref-fasta <ref-fasta>                            
+    -r, --ref-fasta <ref-fasta>
             Indexed reference fasta, set if using CRAM
 
-    -t, --threads <threads>                                
+    -t, --threads <threads>
             The number of threads to use [default: 32]
 
 
 ARGS:
-    <reads>    
+    <reads>
             Input indexed BAM/CRAM to analyze
 ```
 
@@ -402,16 +402,16 @@ USAGE:
     perbase merge-adjacent [FLAGS] [OPTIONS] [in-file]
 
 FLAGS:
-    -Z, --bgzip        
+    -Z, --bgzip
             Optionally bgzip the output
 
-    -h, --help         
+    -h, --help
             Prints help information
 
-    -n, --no-header    
+    -n, --no-header
             Indicate if the input file does not have a header
 
-    -V, --version      
+    -V, --version
             Prints version information
 
 
@@ -422,12 +422,12 @@ OPTIONS:
     -T, --compression-threads <compression-threads>
             The number of threads to use for compressing output (specified by --bgzip) [default: 32]
 
-    -o, --output <output>                              
+    -o, --output <output>
             The output location, defaults to STDOUT
 
 
 ARGS:
-    <in-file>    
+    <in-file>
             Input bed-like file, defaults to STDIN
 ```
 
