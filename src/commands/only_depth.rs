@@ -21,6 +21,9 @@ use std::{collections::HashMap, path::PathBuf};
 use std::{convert::TryFrom, rc::Rc};
 use structopt::{StructOpt, clap::AppSettings};
 
+#[cfg(feature = "seqair-pileup")]
+use perbase_lib::read_filter::ReadView;
+
 /// Calculate only the depth at each base.
 #[derive(StructOpt)]
 #[structopt(author, setting = AppSettings::ArgRequiredElseHelp)]
@@ -90,6 +93,11 @@ pub struct OnlyDepth {
     #[structopt(long, short = "x")]
     fast_mode: bool,
 
+    /// Use the experimental seqair-backed reader with raw pre-filtering. Requires unmapped reads to be excluded (e.g. -F 4, or -F 3852 instead of -F 3848).
+    #[cfg(feature = "seqair-pileup")]
+    #[structopt(long = "seqair")]
+    seqair: bool,
+
     /// Skip merging adjacent bases that have the same depth.
     #[structopt(long, short = "n")]
     no_merge: bool,
@@ -114,9 +122,87 @@ pub struct OnlyDepth {
     zero_base: bool,
 }
 
+#[cfg(feature = "seqair-pileup")]
+fn path_looks_like_cram(reads: &std::path::Path) -> bool {
+    reads
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cram"))
+}
+
+#[cfg(feature = "seqair-pileup")]
+struct SeqairRawReadView {
+    flags: u16,
+    mapq: u8,
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl ReadView for SeqairRawReadView {
+    #[inline(always)]
+    fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    #[inline(always)]
+    fn mapq(&self) -> u8 {
+        self.mapq
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+struct OnlyDepthSeqairFilter<'a, F: ReadFilter> {
+    read_filter: &'a F,
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<F: ReadFilter> Copy for OnlyDepthSeqairFilter<'_, F> {}
+
+#[cfg(feature = "seqair-pileup")]
+impl<F: ReadFilter> Clone for OnlyDepthSeqairFilter<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<F: ReadFilter> seqair::bam::record_store::CustomizeRecordStore
+    for OnlyDepthSeqairFilter<'_, F>
+{
+    type Extra = ();
+
+    #[inline(always)]
+    fn filter_raw(&mut self, fields: &seqair::bam::record_store::FilterRawFields<'_>) -> bool {
+        let read = SeqairRawReadView {
+            flags: fields.flags.raw(),
+            mapq: fields.mapq,
+        };
+        self.read_filter.filter_read(&read)
+    }
+
+    #[inline(always)]
+    fn compute(
+        &mut self,
+        _rec: &seqair::bam::record_store::SlimRecord,
+        _store: &seqair::bam::RecordStore<()>,
+    ) {
+    }
+}
+
 impl OnlyDepth {
     pub fn run(self) -> Result<()> {
         info!("Running only-depth on: {:?}", self.reads);
+        #[cfg(feature = "seqair-pileup")]
+        if self.seqair && path_looks_like_cram(&self.reads) {
+            anyhow::bail!(
+                "The experimental seqair only-depth path currently supports BAM input only"
+            );
+        }
+        #[cfg(feature = "seqair-pileup")]
+        if self.seqair && self.exclude_flags & 0x4 == 0 {
+            anyhow::bail!(
+                "The experimental seqair only-depth path requires unmapped reads to be excluded; add -F 4, or use -F 3852 if you would otherwise use -F 3848"
+            );
+        }
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
         let mut writer = utils::get_writer(
@@ -139,6 +225,8 @@ impl OnlyDepth {
             if self.zero_base { 0 } else { 1 },
             read_filter,
         );
+        #[cfg(feature = "seqair-pileup")]
+        let processor = processor.with_seqair(self.seqair)?;
 
         let par_granges_runner = par_granges::ParGranges::new(
             self.reads.clone(),
@@ -181,6 +269,23 @@ impl OnlyDepth {
         // This is a heuristic, so it just have to never have a false negative and not have false positives > N% of the time
         (tlen / 2) < read_len || (record.mpos() - record.pos()).abs() < read_len
     }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline]
+    fn maybe_overlaps_mate_seqair(
+        rec: &seqair::bam::record_store::SlimRecord,
+        reference_stop: u32,
+    ) -> bool {
+        if !rec.flags.is_paired() || rec.tid != rec.next_ref_id {
+            return false;
+        }
+
+        let tlen = i64::from(rec.template_len).abs();
+        let read_len = i64::from(reference_stop) - rec.pos.as_i64();
+        let mate_delta = i64::from(rec.next_pos) - rec.pos.as_i64();
+        // Keep this heuristic byte-for-byte equivalent in intent to the htslib path above.
+        (tlen / 2) < read_len || mate_delta.abs() < read_len
+    }
 }
 
 /// Holds the info needed for [par_io::RegionProcessor] implementation
@@ -201,6 +306,12 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     read_filter: F,
     /// 0-based or 1-based coordinate output
     coord_base: u32,
+    /// Use seqair's indexed reader instead of htslib.
+    #[cfg(feature = "seqair-pileup")]
+    seqair: bool,
+    /// Template seqair reader to fork per region, sharing parsed header/index.
+    #[cfg(feature = "seqair-pileup")]
+    seqair_reader_template: Option<seqair::reader::IndexedReader>,
 }
 
 impl<F: ReadFilter> OnlyDepthProcessor<F> {
@@ -225,7 +336,20 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             keep_zeros,
             coord_base,
             read_filter,
+            #[cfg(feature = "seqair-pileup")]
+            seqair: false,
+            #[cfg(feature = "seqair-pileup")]
+            seqair_reader_template: None,
         }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn with_seqair(mut self, seqair: bool) -> Result<Self> {
+        self.seqair = seqair;
+        if seqair {
+            self.seqair_reader_template = Some(seqair::reader::IndexedReader::open(&self.reads)?);
+        }
+        Ok(self)
     }
 
     /// Sum the counts within the region to get the depths at each RangePosition
@@ -456,6 +580,333 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
         self.sum_counter(counter, contig, start, stop)
     }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_region_seqair(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
+        if start >= stop {
+            return Vec::new();
+        }
+
+        let (store, contig) = self.fetch_seqair_store(tid, start, stop);
+        match (self.fast_mode, self.mate_fix) {
+            (false, false) => self.process_seqair_normal_no_mate(store, &contig, start, stop),
+            (false, true) => self.process_seqair_normal_mate_aware(store, &contig, start, stop),
+            (true, false) => self.process_seqair_fast_no_mate(store, &contig, start, stop),
+            (true, true) => self.process_seqair_fast_mate_aware(store, &contig, start, stop),
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn fetch_seqair_store(
+        &self,
+        tid: u32,
+        start: u32,
+        stop: u32,
+    ) -> (seqair::bam::RecordStore<()>, String) {
+        let start_pos = seqair::bam::Pos0::new(start).expect("seqair start position");
+        // seqair uses inclusive end positions; perbase regions are half-open [start, stop).
+        let end_pos = seqair::bam::Pos0::new(stop - 1).expect("seqair end position");
+        let mut store = seqair::bam::RecordStore::new();
+        let mut read_filter = OnlyDepthSeqairFilter {
+            read_filter: &self.read_filter,
+        };
+
+        let mut reader = self
+            .seqair_reader_template
+            .as_ref()
+            .expect("seqair reader template")
+            .fork()
+            .expect("forked seqair reader");
+        let contig = String::from(
+            reader
+                .header()
+                .target_name(tid)
+                .expect("seqair target name"),
+        );
+        reader
+            .fetch_into_customized(tid, start_pos, end_pos, &mut store, &mut read_filter)
+            .expect("seqair fetched a region");
+
+        (store, contig)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn adjusted_seqair_interval(
+        counter_len: usize,
+        interval_start: u32,
+        interval_stop: u32,
+        region_start: u32,
+        region_stop: u32,
+    ) -> Option<(usize, usize, bool)> {
+        if interval_start >= region_stop || interval_stop <= region_start {
+            return None;
+        }
+
+        let adjusted_start = if interval_start < region_start {
+            0
+        } else {
+            (interval_start - region_start) as usize
+        };
+
+        let mut dont_count_stop = false;
+        let adjusted_stop = if interval_stop >= region_stop {
+            dont_count_stop = true;
+            counter_len - 1
+        } else {
+            (interval_stop - region_start) as usize
+        };
+
+        Some((adjusted_start, adjusted_stop, dont_count_stop))
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn add_adjusted_seqair_interval(
+        counter: &mut [i32],
+        adjusted_start: usize,
+        adjusted_stop: usize,
+        dont_count_stop: bool,
+    ) {
+        counter[adjusted_start] += 1;
+        if !dont_count_stop {
+            counter[adjusted_stop] -= 1;
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn seqair_reference_stop(
+        rec: &seqair::bam::record_store::SlimRecord,
+        cigar: &[seqair::bam::CigarOp],
+    ) -> u32 {
+        if cigar.iter().any(|op| op.consumes_ref()) {
+            (*rec.end_pos)
+                .checked_add(1)
+                .expect("seqair end position overflow")
+        } else {
+            *rec.end_pos
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn merge_seqair_mate_intervals(
+        counter: &mut [i32],
+        maties: HashMap<String, Vec<Interval<usize, bool>>>,
+    ) {
+        for (_qname, ivs) in maties {
+            let mut lapper = Lapper::new(ivs);
+            lapper.merge_overlaps();
+            for iv in lapper.intervals {
+                counter[iv.start] += 1;
+                if !iv.val {
+                    counter[iv.stop] -= 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_normal_no_mate(
+        &self,
+        store: seqair::bam::RecordStore<()>,
+        contig: &str,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+
+        for idx in 0..store.len() {
+            let idx = u32::try_from(idx).expect("seqair record index");
+            let rec = store.record(idx);
+            let mut ref_pos = *rec.pos;
+            for op in store.cigar(idx) {
+                let len = op.len();
+                match op.op_type() {
+                    seqair::bam::cigar::CigarOpType::Match
+                    | seqair::bam::cigar::CigarOpType::SeqMatch
+                    | seqair::bam::cigar::CigarOpType::SeqMismatch
+                    | seqair::bam::cigar::CigarOpType::Deletion => {
+                        let block_start = ref_pos;
+                        let block_stop = ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                        if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                            Self::adjusted_seqair_interval(
+                                counter.len(),
+                                block_start,
+                                block_stop,
+                                start,
+                                stop,
+                            )
+                        {
+                            Self::add_adjusted_seqair_interval(
+                                &mut counter,
+                                adjusted_start,
+                                adjusted_stop,
+                                dont_count_stop,
+                            );
+                        }
+                        ref_pos = block_stop;
+                    }
+                    seqair::bam::cigar::CigarOpType::RefSkip => {
+                        ref_pos = ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                    }
+                    seqair::bam::cigar::CigarOpType::Insertion
+                    | seqair::bam::cigar::CigarOpType::SoftClip
+                    | seqair::bam::cigar::CigarOpType::HardClip
+                    | seqair::bam::cigar::CigarOpType::Padding
+                    | seqair::bam::cigar::CigarOpType::Unknown(_) => {}
+                }
+            }
+        }
+
+        self.sum_counter(counter, contig, start, stop)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_normal_mate_aware(
+        &self,
+        store: seqair::bam::RecordStore<()>,
+        contig: &str,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut maties: HashMap<String, Vec<Interval<usize, bool>>> = HashMap::new();
+
+        for idx in 0..store.len() {
+            let idx = u32::try_from(idx).expect("seqair record index");
+            let rec = store.record(idx);
+            let cigar = store.cigar(idx);
+            let reference_stop = Self::seqair_reference_stop(rec, cigar);
+            let maybe_mate_key = if OnlyDepth::maybe_overlaps_mate_seqair(rec, reference_stop) {
+                Some(String::from(
+                    std::str::from_utf8(store.qname(idx)).expect("Convert qname"),
+                ))
+            } else {
+                None
+            };
+
+            let mut ref_pos = *rec.pos;
+            for op in cigar {
+                let len = op.len();
+                match op.op_type() {
+                    seqair::bam::cigar::CigarOpType::Match
+                    | seqair::bam::cigar::CigarOpType::SeqMatch
+                    | seqair::bam::cigar::CigarOpType::SeqMismatch
+                    | seqair::bam::cigar::CigarOpType::Deletion => {
+                        let block_start = ref_pos;
+                        let block_stop = ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                        if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                            Self::adjusted_seqair_interval(
+                                counter.len(),
+                                block_start,
+                                block_stop,
+                                start,
+                                stop,
+                            )
+                        {
+                            if let Some(mate_key) = &maybe_mate_key {
+                                maties.entry(mate_key.clone()).or_default().push(Interval {
+                                    start: adjusted_start,
+                                    stop: adjusted_stop,
+                                    val: dont_count_stop,
+                                });
+                            } else {
+                                Self::add_adjusted_seqair_interval(
+                                    &mut counter,
+                                    adjusted_start,
+                                    adjusted_stop,
+                                    dont_count_stop,
+                                );
+                            }
+                        }
+                        ref_pos = block_stop;
+                    }
+                    seqair::bam::cigar::CigarOpType::RefSkip => {
+                        ref_pos = ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                    }
+                    seqair::bam::cigar::CigarOpType::Insertion
+                    | seqair::bam::cigar::CigarOpType::SoftClip
+                    | seqair::bam::cigar::CigarOpType::HardClip
+                    | seqair::bam::cigar::CigarOpType::Padding
+                    | seqair::bam::cigar::CigarOpType::Unknown(_) => {}
+                }
+            }
+        }
+
+        Self::merge_seqair_mate_intervals(&mut counter, maties);
+        self.sum_counter(counter, contig, start, stop)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_fast_no_mate(
+        &self,
+        store: seqair::bam::RecordStore<()>,
+        contig: &str,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+
+        for idx in 0..store.len() {
+            let idx = u32::try_from(idx).expect("seqair record index");
+            let rec = store.record(idx);
+            let reference_stop = Self::seqair_reference_stop(rec, store.cigar(idx));
+            if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                Self::adjusted_seqair_interval(counter.len(), *rec.pos, reference_stop, start, stop)
+            {
+                Self::add_adjusted_seqair_interval(
+                    &mut counter,
+                    adjusted_start,
+                    adjusted_stop,
+                    dont_count_stop,
+                );
+            }
+        }
+
+        self.sum_counter(counter, contig, start, stop)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_fast_mate_aware(
+        &self,
+        store: seqair::bam::RecordStore<()>,
+        contig: &str,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut maties: HashMap<String, Vec<Interval<usize, bool>>> = HashMap::new();
+
+        for idx in 0..store.len() {
+            let idx = u32::try_from(idx).expect("seqair record index");
+            let rec = store.record(idx);
+            let reference_stop = Self::seqair_reference_stop(rec, store.cigar(idx));
+            if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                Self::adjusted_seqair_interval(counter.len(), *rec.pos, reference_stop, start, stop)
+            {
+                if OnlyDepth::maybe_overlaps_mate_seqair(rec, reference_stop) {
+                    let qname =
+                        String::from(std::str::from_utf8(store.qname(idx)).expect("Convert qname"));
+                    maties.entry(qname).or_default().push(Interval {
+                        start: adjusted_start,
+                        stop: adjusted_stop,
+                        val: dont_count_stop,
+                    });
+                } else {
+                    Self::add_adjusted_seqair_interval(
+                        &mut counter,
+                        adjusted_start,
+                        adjusted_stop,
+                        dont_count_stop,
+                    );
+                }
+            }
+        }
+
+        Self::merge_seqair_mate_intervals(&mut counter, maties);
+        self.sum_counter(counter, contig, start, stop)
+    }
 }
 
 /// Implement [par_io::RegionProcessor] for [SimpleProcessor]
@@ -468,6 +919,11 @@ impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
     /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
+        #[cfg(feature = "seqair-pileup")]
+        if self.seqair {
+            return self.process_region_seqair(tid, start, stop);
+        }
+
         if self.fast_mode {
             self.process_region_fast(tid, start, stop)
         } else {
@@ -856,6 +1312,77 @@ mod tests {
                 pos.push(p)
             });
         positions
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn collect_only_depth_tuples(
+        bam_path: PathBuf,
+        fast_mode: bool,
+        mate_fix: bool,
+        seqair: bool,
+        read_filter: DefaultReadFilter,
+    ) -> Vec<(std::string::String, u32, u32, u32)> {
+        let cpus = utils::determine_allowed_cpus(8).unwrap();
+        let onlydepth_processor = OnlyDepthProcessor::new(
+            bam_path.clone(),
+            None,
+            mate_fix,
+            fast_mode,
+            false,
+            false,
+            0,
+            read_filter,
+        )
+        .with_seqair(seqair)
+        .unwrap();
+
+        let par_granges_runner = par_granges::ParGranges::new(
+            bam_path,
+            None,
+            None,
+            None,
+            true,
+            Some(cpus),
+            Some(1_000_000),
+            Some(0.001),
+            onlydepth_processor,
+        );
+        let mut positions: Vec<_> = par_granges_runner
+            .process()
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.ref_seq.to_string(), p.pos, p.end, p.depth))
+            .collect();
+        positions.sort();
+        positions
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[rstest(
+        fast_mode => [false, true],
+        mate_fix => [false, true]
+    )]
+    fn seqair_only_depth_matches_htslib(
+        fast_mode: bool,
+        mate_fix: bool,
+        bamfile: (PathBuf, TempDir),
+    ) {
+        let htslib_positions = collect_only_depth_tuples(
+            bamfile.0.clone(),
+            fast_mode,
+            mate_fix,
+            false,
+            DefaultReadFilter::new(0, 512, 0),
+        );
+        let seqair_positions = collect_only_depth_tuples(
+            bamfile.0,
+            fast_mode,
+            mate_fix,
+            true,
+            DefaultReadFilter::new(0, 512, 0),
+        );
+
+        assert_eq!(htslib_positions, seqair_positions);
     }
 
     #[rstest(
