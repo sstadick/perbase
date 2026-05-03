@@ -131,6 +131,47 @@ impl PileupPosition {
         }
     }
 
+    /// Given a raw seqair pileup read observation, update the counts at this position.
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn update_seqair_raw<F: ReadFilter>(
+        &mut self,
+        alignment: &seqair::bam::pileup::PileupAlignment,
+        read_filter: &F,
+        base_filter: Option<u8>,
+    ) {
+        if !read_filter.filter_read(alignment) {
+            self.depth -= 1;
+            self.fail += 1;
+            return;
+        }
+
+        match alignment.op() {
+            seqair::bam::pileup::PileupOp::RefSkip => {
+                self.ref_skip += 1;
+                self.depth -= 1;
+            }
+            seqair::bam::pileup::PileupOp::Deletion { .. } => {
+                self.del += 1;
+            }
+            seqair::bam::pileup::PileupOp::ComplexIndel { is_refskip, .. } => {
+                if *is_refskip {
+                    self.ref_skip += 1;
+                    self.depth -= 1;
+                } else {
+                    self.del += 1;
+                }
+            }
+            seqair::bam::pileup::PileupOp::Match { base, qual, .. } => {
+                self.update_seqair_base(*base, *qual, base_filter);
+            }
+            seqair::bam::pileup::PileupOp::Insertion { base, qual, .. } => {
+                self.update_seqair_base(*base, *qual, base_filter);
+                self.ins += 1;
+            }
+        }
+    }
+
     /// Given an htslib pileup read observation, update the counts at this position.
     #[inline(always)]
     fn update_htslib<F: ReadFilter>(
@@ -185,6 +226,30 @@ impl PileupPosition {
 
         if mates_resolved {
             self.count_of_mate_resolutions += 1;
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn update_seqair_base(
+        &mut self,
+        base: seqair_types::Base,
+        qual: seqair_types::BaseQuality,
+        base_filter: Option<u8>,
+    ) {
+        if let Some(base_qual_filter) = base_filter
+            && qual.get().is_none_or(|qual| qual < base_qual_filter)
+        {
+            self.n += 1;
+            return;
+        }
+
+        match base {
+            seqair_types::Base::A => self.a += 1,
+            seqair_types::Base::C => self.c += 1,
+            seqair_types::Base::G => self.g += 1,
+            seqair_types::Base::T => self.t += 1,
+            seqair_types::Base::Unknown => self.n += 1,
         }
     }
 
@@ -305,7 +370,7 @@ impl PileupPosition {
 
     /// Convert a seqair pileup column into a `Position`.
     #[cfg(feature = "seqair-pileup")]
-    #[inline]
+    #[inline(always)]
     pub fn from_seqair_column<U, F: ReadFilter>(
         ref_seq: String,
         column: &seqair::bam::pileup::PileupColumn<'_, U>,
@@ -315,8 +380,8 @@ impl PileupPosition {
         let mut pos = Self::new(ref_seq, *column.pos());
         pos.depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
 
-        for alignment in column.alignments() {
-            Self::update(&mut pos, &alignment, read_filter, base_filter, None, false);
+        for alignment in column.raw_alignments() {
+            pos.update_seqair_raw(alignment, read_filter, base_filter);
         }
         pos
     }

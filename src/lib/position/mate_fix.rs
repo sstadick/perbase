@@ -304,6 +304,19 @@ impl<'a> PileupReadView for (Alignment<'a>, Record) {
 }
 
 #[cfg(feature = "seqair-pileup")]
+impl ReadView for seqair::bam::pileup::PileupAlignment {
+    #[inline(always)]
+    fn flags(&self) -> u16 {
+        self.flags.raw()
+    }
+
+    #[inline(always)]
+    fn mapq(&self) -> u8 {
+        self.mapq
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
 impl<'a, 'store, U> ReadView for seqair::bam::pileup::AlignmentView<'a, 'store, U> {
     #[inline(always)]
     fn flags(&self) -> u16 {
