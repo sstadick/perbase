@@ -94,6 +94,17 @@ If the `--mate-fix` flag is passed, each position will first check if there are 
 
 If the `--reference-fasta` is supplied, the `REF_BASE` field will be filled in. The reference must be indexed and match the BAM/CRAM header of the input.
 
+#### Experimental seqair pileup backend
+
+`base-depth` can optionally be built with an experimental seqair-backed pileup engine:
+
+```bash
+cargo build --release --features seqair-pileup
+perbase base-depth --seqair-pileup ./test/test.bam
+```
+
+The htslib-backed path remains the default. The seqair path currently requires `--ref-fasta` for CRAM input.
+
 The output can be compressed and indexed as follows:
 
 ```bash
@@ -173,6 +184,9 @@ FLAGS:
 
             **NOTE** If this is set it could result in duplicate output entries for regions that overlap. **NOTE** This
             may cause issues with downstream tooling.
+        --seqair-pileup
+            Use the experimental seqair-backed pileup engine
+
     -V, --version
             Prints version information
 

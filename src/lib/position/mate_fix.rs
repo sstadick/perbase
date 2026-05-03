@@ -38,7 +38,7 @@
 //!
 //! ## MateResolutionStrategy::Original
 //! MAPQ -> first in pair
-use crate::read_filter::ReadFilter;
+use crate::read_filter::{ReadFilter, ReadView};
 use rust_htslib::bam::{pileup::Alignment, record::Record};
 use strum::EnumString;
 
@@ -218,16 +218,158 @@ pub enum MateResolutionStrategy {
     Original,
 }
 
+/// Pileup-level read data needed by base counting and mate resolution.
+pub(crate) trait PileupReadView: ReadView {
+    /// Query name for grouping mates.
+    fn qname(&self) -> &[u8];
+
+    /// Query position for this pileup observation, if it has one.
+    fn qpos(&self) -> Option<usize>;
+
+    /// Base at this pileup observation, if available.
+    fn base(&self) -> Option<Base>;
+
+    /// Base quality at this pileup observation, if available.
+    fn base_qual(&self) -> Option<u8>;
+
+    /// Whether this observation is a reference skip.
+    fn is_refskip(&self) -> bool;
+
+    /// Whether this observation is a deletion or reference skip.
+    fn is_del(&self) -> bool;
+
+    /// Whether this observation has an insertion immediately after it.
+    fn has_insertion(&self) -> bool;
+}
+
+impl<'a> ReadView for (Alignment<'a>, Record) {
+    #[inline(always)]
+    fn flags(&self) -> u16 {
+        self.1.flags()
+    }
+
+    #[inline(always)]
+    fn mapq(&self) -> u8 {
+        self.1.mapq()
+    }
+}
+
+impl<'a> PileupReadView for (Alignment<'a>, Record) {
+    #[inline(always)]
+    fn qname(&self) -> &[u8] {
+        self.1.qname()
+    }
+
+    #[inline(always)]
+    fn qpos(&self) -> Option<usize> {
+        self.0.qpos()
+    }
+
+    #[inline(always)]
+    fn base(&self) -> Option<Base> {
+        let qpos = self.qpos()?;
+        let seq = self.1.seq();
+        if qpos >= seq.len() {
+            return None;
+        }
+        Some(Base::from(seq[qpos] as char))
+    }
+
+    #[inline(always)]
+    fn base_qual(&self) -> Option<u8> {
+        let qpos = self.qpos()?;
+        self.1.qual().get(qpos).copied()
+    }
+
+    #[inline(always)]
+    fn is_refskip(&self) -> bool {
+        self.0.is_refskip()
+    }
+
+    #[inline(always)]
+    fn is_del(&self) -> bool {
+        self.0.is_del()
+    }
+
+    #[inline(always)]
+    fn has_insertion(&self) -> bool {
+        matches!(self.0.indel(), rust_htslib::bam::pileup::Indel::Ins(_))
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<'a, 'store, U> ReadView for seqair::bam::pileup::AlignmentView<'a, 'store, U> {
+    #[inline(always)]
+    fn flags(&self) -> u16 {
+        self.flags.raw()
+    }
+
+    #[inline(always)]
+    fn mapq(&self) -> u8 {
+        self.mapq
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<'a, 'store, U> PileupReadView for seqair::bam::pileup::AlignmentView<'a, 'store, U> {
+    #[inline(always)]
+    fn qname(&self) -> &[u8] {
+        seqair::bam::pileup::AlignmentView::qname(self)
+    }
+
+    #[inline(always)]
+    fn qpos(&self) -> Option<usize> {
+        seqair::bam::pileup::PileupAlignment::qpos(self)
+    }
+
+    #[inline(always)]
+    fn base(&self) -> Option<Base> {
+        seqair::bam::pileup::PileupAlignment::base(self).map(seqair_base_to_base)
+    }
+
+    #[inline(always)]
+    fn base_qual(&self) -> Option<u8> {
+        seqair::bam::pileup::PileupAlignment::qual(self).and_then(|qual| qual.get())
+    }
+
+    #[inline(always)]
+    fn is_refskip(&self) -> bool {
+        seqair::bam::pileup::PileupAlignment::is_refskip(self)
+    }
+
+    #[inline(always)]
+    fn is_del(&self) -> bool {
+        seqair::bam::pileup::PileupAlignment::is_del(self)
+    }
+
+    #[inline(always)]
+    fn has_insertion(&self) -> bool {
+        seqair::bam::pileup::PileupAlignment::insert_len(self) > 0
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+#[inline(always)]
+fn seqair_base_to_base(base: seqair_types::Base) -> Base {
+    match base {
+        seqair_types::Base::A => Base::A,
+        seqair_types::Base::C => Base::C,
+        seqair_types::Base::G => Base::G,
+        seqair_types::Base::T => Base::T,
+        seqair_types::Base::Unknown => Base::N,
+    }
+}
+
 impl MateResolutionStrategy {
-    pub(crate) fn cmp<F: ReadFilter>(
-        &self,
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-        read_filter: &F,
-    ) -> MateResolution {
+    pub(crate) fn cmp<A, B, F>(&self, a: &A, b: &B, read_filter: &F) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+        F: ReadFilter,
+    {
         // Handle user-set filters.
-        let a_pass = read_filter.filter_read(&a.1, Some(&a.0));
-        let b_pass = read_filter.filter_read(&b.1, Some(&b.0));
+        let a_pass = read_filter.filter_read(a);
+        let b_pass = read_filter.filter_read(b);
         if a_pass && !b_pass {
             return MateResolution::new(Ordering::Greater, None);
         } else if b_pass && !a_pass {
@@ -247,109 +389,80 @@ impl MateResolutionStrategy {
             }
             MateResolutionStrategy::MapQualBaseQualIUPAC => Self::map_qual_base_qual_iupac(a, b),
             MateResolutionStrategy::MapQualBaseQualN => Self::map_qual_base_qual_n(a, b),
-            MateResolutionStrategy::IUPAC => Self::resolve_base::<false>(a, b),
-            MateResolutionStrategy::N => Self::resolve_base::<true>(a, b),
+            MateResolutionStrategy::IUPAC => Self::resolve_base::<false, _, _>(a, b),
+            MateResolutionStrategy::N => Self::resolve_base::<true, _, _>(a, b),
             MateResolutionStrategy::Original => Self::original(a, b),
         }
     }
 
-    pub(crate) fn resolve_base<const DEFAULT_TO_N: bool>(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
+    pub(crate) fn resolve_base<const DEFAULT_TO_N: bool, A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        let Some(a_base) = a.base() else {
             return Self::original(a, b);
-        }
+        };
+        let Some(b_base) = b.base() else {
+            return Self::original(a, b);
+        };
 
-        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
         MateResolution::new(
             Ordering::Greater,
             Some(Base::either_or::<DEFAULT_TO_N>(a_base, b_base)),
         )
     }
 
-    pub(crate) fn base_qual_map_qual_n(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
-            return Self::original(a, b);
-        }
+    pub(crate) fn base_qual_map_qual_n<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        Self::base_qual_map_qual::<true, _, _>(a, b)
+    }
 
-        // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+    pub(crate) fn base_qual_map_qual_iupac<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        Self::base_qual_map_qual::<false, _, _>(a, b)
+    }
+
+    fn base_qual_map_qual<const DEFAULT_TO_N: bool, A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        let Some(a_qual) = a.base_qual() else {
+            return Self::original(a, b);
+        };
+        let Some(b_qual) = b.base_qual() else {
+            return Self::original(a, b);
+        };
 
         match a_qual.cmp(&b_qual) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => match a.1.mapq().cmp(&b.1.mapq()) {
+            Ordering::Equal => match a.mapq().cmp(&b.mapq()) {
                 Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                 Ordering::Less => MateResolution::new(Ordering::Less, None),
-                Ordering::Equal => {
-                    let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                    let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
-                    let base = Base::either_or::<true>(a_base, b_base);
-                    MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
-                }
+                Ordering::Equal => Self::resolve_base::<DEFAULT_TO_N, _, _>(a, b),
             },
         }
     }
 
-    pub(crate) fn base_qual_map_qual_iupac(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
+    pub(crate) fn base_qual_map_qual_first_in_pair<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        let Some(a_qual) = a.base_qual() else {
             return Self::original(a, b);
-        }
-
-        // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
-
-        match a_qual.cmp(&b_qual) {
-            Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-            Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => match a.1.mapq().cmp(&b.1.mapq()) {
-                Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-                Ordering::Less => MateResolution::new(Ordering::Less, None),
-                Ordering::Equal => {
-                    let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                    let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
-                    MateResolution::new(
-                        Ordering::Greater,
-                        Some(Base::either_or::<false>(a_base, b_base)),
-                    )
-                }
-            },
-        }
-    }
-
-    pub(crate) fn base_qual_map_qual_first_in_pair(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
+        };
+        let Some(b_qual) = b.base_qual() else {
             return Self::original(a, b);
-        }
-
-        // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+        };
 
         match a_qual.cmp(&b_qual) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
@@ -358,127 +471,93 @@ impl MateResolutionStrategy {
         }
     }
 
-    pub(crate) fn map_qual_base_qual_n(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
-            return Self::original(a, b);
-        }
+    pub(crate) fn map_qual_base_qual_n<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        Self::map_qual_base_qual::<true, _, _>(a, b)
+    }
 
-        match a.1.mapq().cmp(&b.1.mapq()) {
+    pub(crate) fn map_qual_base_qual_iupac<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        Self::map_qual_base_qual::<false, _, _>(a, b)
+    }
+
+    fn map_qual_base_qual<const DEFAULT_TO_N: bool, A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        let Some(a_qual) = a.base_qual() else {
+            return Self::original(a, b);
+        };
+        let Some(b_qual) = b.base_qual() else {
+            return Self::original(a, b);
+        };
+
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
-
-                match a_qual.cmp(&b_qual) {
-                    Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-                    Ordering::Less => MateResolution::new(Ordering::Less, None),
-                    Ordering::Equal => {
-                        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
-                        let base = Base::either_or::<true>(a_base, b_base);
-                        MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
-                    }
-                }
-            }
+            Ordering::Equal => match a_qual.cmp(&b_qual) {
+                Ordering::Greater => MateResolution::new(Ordering::Greater, None),
+                Ordering::Less => MateResolution::new(Ordering::Less, None),
+                Ordering::Equal => Self::resolve_base::<DEFAULT_TO_N, _, _>(a, b),
+            },
         }
     }
 
-    pub(crate) fn map_qual_base_qual_iupac(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
+    pub(crate) fn map_qual_base_qual_first_in_pair<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        let Some(a_qual) = a.base_qual() else {
             return Self::original(a, b);
-        }
+        };
+        let Some(b_qual) = b.base_qual() else {
+            return Self::original(a, b);
+        };
 
-        match a.1.mapq().cmp(&b.1.mapq()) {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
-
-                match a_qual.cmp(&b_qual) {
-                    Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-                    Ordering::Less => MateResolution::new(Ordering::Less, None),
-                    Ordering::Equal => {
-                        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
-                        MateResolution::new(
-                            Ordering::Greater,
-                            Some(Base::either_or::<false>(a_base, b_base)),
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn map_qual_base_qual_first_in_pair(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
-        if a_is_not_base || b_is_not_base {
-            return Self::original(a, b);
-        }
-
-        match a.1.mapq().cmp(&b.1.mapq()) {
-            Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-            Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
-
-                match a_qual.cmp(&b_qual) {
-                    Ordering::Greater => MateResolution::new(Ordering::Greater, None),
-                    Ordering::Less => MateResolution::new(Ordering::Less, None),
-                    Ordering::Equal => {
-                        if a.1.flags() & 64 != 0 {
-                            MateResolution::new(Ordering::Greater, None)
-                        } else if b.1.flags() & 64 != 0 {
-                            MateResolution::new(Ordering::Less, None)
-                        } else {
-                            // Default to `a` in the event that there is no first in pair for some reason
-                            MateResolution::new(Ordering::Greater, None)
-                        }
-                    }
-                }
-            }
+            Ordering::Equal => match a_qual.cmp(&b_qual) {
+                Ordering::Greater => MateResolution::new(Ordering::Greater, None),
+                Ordering::Less => MateResolution::new(Ordering::Less, None),
+                Ordering::Equal => Self::first_in_pair(a, b),
+            },
         }
     }
 
     /// Whichever has higher MAPQ, or if equal, whichever is first in pair
-    pub(crate) fn original(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        match a.1.mapq().cmp(&b.1.mapq()) {
+    pub(crate) fn original<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => {
-                // Check if a is first in pair
-                if a.1.flags() & 64 != 0 {
-                    MateResolution::new(Ordering::Greater, None)
-                } else if b.1.flags() & 64 != 0 {
-                    MateResolution::new(Ordering::Less, None)
-                } else {
-                    // Default to `a` in the event that there is no first in pair for some reason
-                    MateResolution::new(Ordering::Greater, None)
-                }
-            }
+            Ordering::Equal => Self::first_in_pair(a, b),
+        }
+    }
+
+    fn first_in_pair<A, B>(a: &A, b: &B) -> MateResolution
+    where
+        A: PileupReadView + ?Sized,
+        B: PileupReadView + ?Sized,
+    {
+        if a.flags() & 64 != 0 {
+            MateResolution::new(Ordering::Greater, None)
+        } else if b.flags() & 64 != 0 {
+            MateResolution::new(Ordering::Less, None)
+        } else {
+            // Default to `a` in the event that there is no first in pair for some reason
+            MateResolution::new(Ordering::Greater, None)
         }
     }
 }

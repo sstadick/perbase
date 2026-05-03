@@ -76,6 +76,11 @@ pub struct BaseDepth {
     #[structopt(long, short = "m")]
     mate_fix: bool,
 
+    /// Use the experimental seqair-backed pileup engine.
+    #[cfg(feature = "seqair-pileup")]
+    #[structopt(long = "seqair-pileup")]
+    seqair_pileup: bool,
+
     /// If `mate_fix` is true, select the method to use for mate fixing.
     #[structopt(long, default_value = "original")]
     mate_resolution_strategy: MateResolutionStrategy,
@@ -114,9 +119,67 @@ pub struct BaseDepth {
     max_depth: u32,
 }
 
+#[cfg(feature = "seqair-pileup")]
+fn path_looks_like_cram(reads: &std::path::Path) -> bool {
+    reads
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cram"))
+}
+
+#[cfg(feature = "seqair-pileup")]
+enum SeqairReaderTemplate {
+    Indexed(seqair::reader::IndexedReader),
+    Readers(seqair::Readers),
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl SeqairReaderTemplate {
+    fn open(reads: &std::path::Path, ref_fasta: Option<&std::path::Path>) -> Result<Self> {
+        if let Some(ref_fasta) = ref_fasta {
+            Ok(Self::Readers(seqair::Readers::open(reads, ref_fasta)?))
+        } else {
+            Ok(Self::Indexed(seqair::reader::IndexedReader::open(reads)?))
+        }
+    }
+
+    fn fork(&self) -> Result<Self> {
+        match self {
+            Self::Indexed(reader) => Ok(Self::Indexed(reader.fork()?)),
+            Self::Readers(readers) => Ok(Self::Readers(readers.fork()?)),
+        }
+    }
+
+    fn target_name(&self, tid: u32) -> Option<&str> {
+        match self {
+            Self::Indexed(reader) => reader.header().target_name(tid),
+            Self::Readers(readers) => readers.header().target_name(tid),
+        }
+    }
+
+    fn fetch_into(
+        &mut self,
+        tid: u32,
+        start: seqair::bam::Pos0,
+        end: seqair::bam::Pos0,
+        store: &mut seqair::bam::RecordStore,
+    ) -> Result<usize> {
+        match self {
+            Self::Indexed(reader) => Ok(reader.fetch_into(tid, start, end, store)?),
+            Self::Readers(readers) => Ok(readers.fetch_into(tid, start, end, store)?),
+        }
+    }
+}
+
 impl BaseDepth {
     pub fn run(self) -> Result<()> {
         info!("Running base-depth on: {:?}", self.reads);
+        #[cfg(feature = "seqair-pileup")]
+        if self.seqair_pileup && self.ref_fasta.is_none() && path_looks_like_cram(&self.reads) {
+            anyhow::bail!(
+                "The experimental seqair pileup path requires --ref-fasta for CRAM input"
+            );
+        }
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
         let mut writer = utils::get_writer(
@@ -141,6 +204,8 @@ impl BaseDepth {
             self.ref_cache_size,
             self.min_base_quality_score,
         );
+        #[cfg(feature = "seqair-pileup")]
+        let base_processor = base_processor.with_seqair_pileup(self.seqair_pileup)?;
 
         let par_granges_runner = par_granges::ParGranges::new(
             self.reads.clone(),
@@ -183,12 +248,18 @@ struct BaseProcessor<F: ReadFilter> {
     coord_base: u32,
     /// implementation of [position::ReadFilter] that will be used
     read_filter: F,
-    /// max depth to pass to htslib pileup engine, max value is MAX(i32)
+    /// Max depth requested for pileup; the htslib engine is capped at `i32::MAX`.
     max_depth: u32,
     /// the cutoff at which we start logging warnings about depth being close to max depth
     max_depth_warnings_cutoff: u32,
     /// an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
     min_base_quality_score: Option<u8>,
+    /// Use seqair's pileup engine instead of htslib's pileup engine.
+    #[cfg(feature = "seqair-pileup")]
+    seqair_pileup: bool,
+    /// Template seqair reader to fork per region, sharing parsed header/index.
+    #[cfg(feature = "seqair-pileup")]
+    seqair_reader_template: Option<SeqairReaderTemplate>,
 }
 
 impl<F: ReadFilter> BaseProcessor<F> {
@@ -225,7 +296,138 @@ impl<F: ReadFilter> BaseProcessor<F> {
             // Set cutoff to 1% of whatever max_depth is.
             max_depth_warnings_cutoff: max_depth - (max_depth as f64 * 0.01) as u32,
             min_base_quality_score,
+            #[cfg(feature = "seqair-pileup")]
+            seqair_pileup: false,
+            #[cfg(feature = "seqair-pileup")]
+            seqair_reader_template: None,
         }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn with_seqair_pileup(mut self, seqair_pileup: bool) -> Result<Self> {
+        self.seqair_pileup = seqair_pileup;
+        if seqair_pileup {
+            self.seqair_reader_template = Some(SeqairReaderTemplate::open(
+                &self.reads,
+                self.ref_fasta.as_deref(),
+            )?);
+        }
+        Ok(self)
+    }
+
+    fn finalize_pileup_position(&self, pos: &mut PileupPosition, pileup_depth: u32) {
+        // Add the ref base if reference is available. `pos.pos` is still 0-based here.
+        if let Some(buffer) = &self.ref_buffer {
+            let seq = buffer
+                .seq(&pos.ref_seq)
+                .expect("Fetched reference sequence");
+            pos.ref_base = Some(char::from(
+                *seq.get(pos.pos as usize)
+                    .expect("Input SAM does not match reference"),
+            ));
+        }
+        if pileup_depth > self.max_depth_warnings_cutoff {
+            pos.near_max_depth = true;
+        }
+        pos.pos += self.coord_base;
+    }
+
+    fn fill_zero_positions(
+        &self,
+        result: Vec<PileupPosition>,
+        ref_name: smartstring::alias::String,
+        start: u32,
+        stop: u32,
+    ) -> Vec<PileupPosition> {
+        if !self.keep_zeros {
+            return result;
+        }
+
+        let mut new_result = vec![];
+        let mut pos = start;
+
+        for position in result.into_iter() {
+            while pos < (position.pos - self.coord_base) {
+                new_result.push(PileupPosition::new(ref_name.clone(), pos + self.coord_base));
+                pos += 1;
+            }
+            new_result.push(position);
+            pos += 1;
+        }
+        while pos < stop {
+            new_result.push(PileupPosition::new(ref_name.clone(), pos + self.coord_base));
+            pos += 1;
+        }
+        new_result
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_region_seqair(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
+        if start >= stop {
+            return Vec::new();
+        }
+
+        let start_pos = seqair::bam::Pos0::new(start).expect("seqair start position");
+        // seqair uses inclusive end positions; perbase regions are half-open [start, stop).
+        let end_pos = seqair::bam::Pos0::new(stop - 1).expect("seqair end position");
+        let mut store = seqair::bam::RecordStore::new();
+
+        let mut reader = self
+            .seqair_reader_template
+            .as_ref()
+            .expect("seqair reader template")
+            .fork()
+            .expect("forked seqair reader");
+        let ref_name = reader
+            .target_name(tid)
+            .expect("seqair target name")
+            .to_owned();
+        reader
+            .fetch_into(tid, start_pos, end_pos, &mut store)
+            .expect("seqair fetched a region");
+        let ref_name = smartstring::alias::String::from(ref_name.as_str());
+
+        self.positions_from_seqair_store(ref_name, store, start_pos, end_pos, start, stop)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn positions_from_seqair_store(
+        &self,
+        ref_name: smartstring::alias::String,
+        store: seqair::bam::RecordStore,
+        start_pos: seqair::bam::Pos0,
+        end_pos: seqair::bam::Pos0,
+        start: u32,
+        stop: u32,
+    ) -> Vec<PileupPosition> {
+        let mut engine = seqair::bam::pileup::PileupEngine::new(store, start_pos, end_pos);
+        engine.set_max_depth(self.max_depth);
+
+        let mut result = Vec::new();
+        while let Some(column) = engine.pileups() {
+            let pileup_depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
+            let mut pos = if self.mate_fix {
+                PileupPosition::from_seqair_column_mate_aware(
+                    ref_name.clone(),
+                    &column,
+                    &self.read_filter,
+                    self.min_base_quality_score,
+                    self.mate_fix_strategy,
+                )
+            } else {
+                PileupPosition::from_seqair_column(
+                    ref_name.clone(),
+                    &column,
+                    &self.read_filter,
+                    self.min_base_quality_score,
+                )
+            };
+
+            self.finalize_pileup_position(&mut pos, pileup_depth);
+            result.push(pos);
+        }
+
+        self.fill_zero_positions(result, ref_name, start, stop)
     }
 }
 
@@ -239,6 +441,11 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
+        #[cfg(feature = "seqair-pileup")]
+        if self.seqair_pileup {
+            return self.process_region_seqair(tid, start, stop);
+        }
+
         // Create a reader
         let mut reader =
             bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
@@ -276,20 +483,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                             self.min_base_quality_score,
                         )
                     };
-                    // Add the ref base if reference is available
-                    if let Some(buffer) = &self.ref_buffer {
-                        let seq = buffer
-                            .seq(&pos.ref_seq)
-                            .expect("Fetched reference sequence");
-                        pos.ref_base = Some(char::from(
-                            *seq.get(pos.pos as usize)
-                                .expect("Input SAM does not match reference"),
-                        ));
-                    }
-                    if pileup_depth > (self.max_depth_warnings_cutoff) {
-                        pos.near_max_depth = true;
-                    }
-                    pos.pos += self.coord_base;
+                    self.finalize_pileup_position(&mut pos, pileup_depth);
                     Some(pos)
                 } else {
                     None
@@ -297,27 +491,8 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
             })
             .collect();
 
-        if self.keep_zeros {
-            let mut new_result = vec![];
-            let name = PileupPosition::compact_refseq(&header, tid);
-            let mut pos = start;
-
-            for position in result.into_iter() {
-                while pos < (position.pos - self.coord_base) {
-                    new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
-                    pos += 1;
-                }
-                new_result.push(position);
-                pos += 1;
-            }
-            while pos < stop {
-                new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
-                pos += 1;
-            }
-            new_result
-        } else {
-            result
-        }
+        let name = PileupPosition::compact_refseq(&header, tid);
+        self.fill_zero_positions(result, name, start, stop)
     }
 }
 
@@ -1001,5 +1176,148 @@ mod tests {
         assert_eq!(positions.get("chr2").unwrap()[42].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
         assert_eq!(positions.get("chr2").unwrap()[43].n, if !base_qual_filtered_all { 0 } else { 2 - awareness_modifier }); // mate overlap
         assert_eq!(positions.get("chr2").unwrap()[44].n, if !base_qual_filtered_all { 0 } else { 1 });
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[allow(clippy::too_many_arguments)]
+    fn collect_region_positions(
+        bam_path: PathBuf,
+        seqair_pileup: bool,
+        mate_fix: bool,
+        keep_zeros: bool,
+        coord_base: u32,
+        base_quality: Option<u8>,
+        mate_fix_strategy: MateResolutionStrategy,
+    ) -> Vec<PileupPosition> {
+        let read_filter = DefaultReadFilter::new(0, 512, 0);
+        let base_processor = BaseProcessor::new(
+            bam_path,
+            None,
+            mate_fix,
+            mate_fix_strategy,
+            keep_zeros,
+            coord_base,
+            read_filter,
+            500_000,
+            8,
+            base_quality,
+        )
+        .with_seqair_pileup(seqair_pileup)
+        .unwrap();
+
+        let mut positions = Vec::new();
+        positions.extend(base_processor.process_region(0, 0, 100));
+        positions.extend(base_processor.process_region(1, 0, 100));
+        positions
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[rstest(
+        mate_fix,
+        keep_zeros,
+        coord_base,
+        base_quality,
+        mate_fix_strategy,
+        case::default(false, false, 1, None, MateResolutionStrategy::Original),
+        case::mate_aware(true, false, 1, None, MateResolutionStrategy::Original),
+        case::keep_zeros(false, true, 1, None, MateResolutionStrategy::Original),
+        case::mate_aware_keep_zeros(true, true, 1, None, MateResolutionStrategy::Original),
+        case::zero_based(false, false, 0, None, MateResolutionStrategy::Original),
+        case::base_qual_1(false, false, 1, Some(1), MateResolutionStrategy::Original),
+        case::base_qual_3(false, false, 1, Some(3), MateResolutionStrategy::Original),
+        case::mate_aware_base_qual_3(true, false, 1, Some(3), MateResolutionStrategy::Original),
+        case::mate_aware_iupac(true, false, 1, None, MateResolutionStrategy::IUPAC),
+        case::mate_aware_n(true, false, 1, None, MateResolutionStrategy::N),
+        case::mate_aware_baseq_mapq_iupac(
+            true,
+            false,
+            1,
+            None,
+            MateResolutionStrategy::BaseQualMapQualIUPAC
+        ),
+        case::mate_aware_mapq_baseq_iupac(
+            true,
+            false,
+            1,
+            None,
+            MateResolutionStrategy::MapQualBaseQualIUPAC
+        )
+    )]
+    fn seqair_matches_htslib_process_region(
+        bamfile: (PathBuf, TempDir),
+        mate_fix: bool,
+        keep_zeros: bool,
+        coord_base: u32,
+        base_quality: Option<u8>,
+        mate_fix_strategy: MateResolutionStrategy,
+    ) {
+        let htslib_positions = collect_region_positions(
+            bamfile.0.clone(),
+            false,
+            mate_fix,
+            keep_zeros,
+            coord_base,
+            base_quality,
+            mate_fix_strategy,
+        );
+        let seqair_positions = collect_region_positions(
+            bamfile.0.clone(),
+            true,
+            mate_fix,
+            keep_zeros,
+            coord_base,
+            base_quality,
+            mate_fix_strategy,
+        );
+
+        assert_eq!(htslib_positions, seqair_positions);
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn base_depth_for_test(reads: PathBuf, output: PathBuf, seqair_pileup: bool) -> BaseDepth {
+        BaseDepth {
+            reads,
+            ref_fasta: None,
+            bed_file: None,
+            bcf_file: None,
+            output: Some(output),
+            bgzip: false,
+            threads: 4,
+            compression_threads: 1,
+            compression_level: 2,
+            chunksize: 100,
+            channel_size_modifier: 0.001,
+            include_flags: 0,
+            exclude_flags: 512,
+            mate_fix: true,
+            seqair_pileup,
+            mate_resolution_strategy: MateResolutionStrategy::Original,
+            keep_zeros: false,
+            skip_merging_intervals: false,
+            min_mapq: 0,
+            min_base_quality_score: None,
+            zero_base: false,
+            ref_cache_size: 8,
+            max_depth: 500_000,
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[test]
+    fn seqair_base_depth_run_matches_htslib_run() {
+        let (bam_path, tempdir) = bamfile();
+        let htslib_output = tempdir.path().join("htslib.tsv");
+        let seqair_output = tempdir.path().join("seqair.tsv");
+
+        base_depth_for_test(bam_path.clone(), htslib_output.clone(), false)
+            .run()
+            .unwrap();
+        base_depth_for_test(bam_path, seqair_output.clone(), true)
+            .run()
+            .unwrap();
+
+        let htslib_output = std::fs::read_to_string(htslib_output).unwrap();
+        let seqair_output = std::fs::read_to_string(seqair_output).unwrap();
+        assert_eq!(htslib_output, seqair_output);
     }
 }
