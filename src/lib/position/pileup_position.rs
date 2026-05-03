@@ -2,7 +2,11 @@
 use crate::position::Position;
 use crate::read_filter::ReadFilter;
 use itertools::Itertools;
-use rust_htslib::bam::{self, HeaderView, pileup::Pileup};
+use rust_htslib::bam::{
+    self, HeaderView,
+    pileup::{Alignment, Pileup},
+    record::Record,
+};
 use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
 use std::default;
@@ -74,7 +78,8 @@ impl Position for PileupPosition {
 }
 
 impl PileupPosition {
-    /// Given a pileup read observation, update the counts at this position
+    /// Given a pileup read observation, update the counts at this position.
+    #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
     fn update<R, F>(
         &mut self,
@@ -126,6 +131,63 @@ impl PileupPosition {
         }
     }
 
+    /// Given an htslib pileup read observation, update the counts at this position.
+    #[inline(always)]
+    fn update_htslib<F: ReadFilter>(
+        &mut self,
+        alignment: &Alignment,
+        record: &Record,
+        read_filter: &F,
+        base_filter: Option<u8>,
+        recommended_base: Option<Base>,
+        mates_resolved: bool,
+    ) {
+        if !read_filter.filter_read(record) {
+            self.depth -= 1;
+            self.fail += 1;
+            return;
+        }
+        // NB: Order matters here, a refskip is true for both is_del and is_refskip
+        // while a true del is only true for is_del
+        if alignment.is_refskip() {
+            self.ref_skip += 1;
+            self.depth -= 1;
+        } else if alignment.is_del() {
+            self.del += 1;
+        } else {
+            // We have an actual base!
+
+            // Check if we are checking the base quality score
+            // && Check if the base quality score is greater or equal to than the cutoff
+            if let Some(base_qual_filter) = base_filter
+                && (record.seq().is_empty()
+                    || record.qual()[alignment.qpos().unwrap()] < base_qual_filter)
+            {
+                self.n += 1
+            } else if let Some(b) = recommended_base {
+                self.add_base(b);
+            } else if record.seq().is_empty() {
+                self.n += 1
+            } else {
+                match (record.seq()[alignment.qpos().unwrap()] as char).to_ascii_uppercase() {
+                    'A' => self.a += 1,
+                    'C' => self.c += 1,
+                    'T' | 'U' => self.t += 1,
+                    'G' => self.g += 1,
+                    _ => self.n += 1,
+                }
+            }
+            // Check for insertions
+            if let bam::pileup::Indel::Ins(_len) = alignment.indel() {
+                self.ins += 1;
+            }
+        }
+
+        if mates_resolved {
+            self.count_of_mate_resolutions += 1;
+        }
+    }
+
     #[inline(always)]
     fn add_base(&mut self, base: Base) {
         match base {
@@ -168,8 +230,7 @@ impl PileupPosition {
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            let read = (alignment, record);
-            Self::update(&mut pos, &read, read_filter, base_filter, None, false);
+            pos.update_htslib(&alignment, &record, read_filter, base_filter, None, false);
         }
         pos
     }
@@ -226,9 +287,9 @@ impl PileupPosition {
                 // Deal explicitly with mate overlap, they are already ordered correctly
                 let result = mate_fix_strat.cmp(&best, &second_best, read_filter);
                 pos.depth -= total_reads - 1;
-                Self::update(
-                    &mut pos,
-                    &best,
+                pos.update_htslib(
+                    &best.0,
+                    &best.1,
                     read_filter,
                     base_filter,
                     result.recommended_base,
@@ -236,7 +297,7 @@ impl PileupPosition {
                 );
             } else {
                 pos.depth -= total_reads - 1;
-                Self::update(&mut pos, &best, read_filter, base_filter, None, false);
+                pos.update_htslib(&best.0, &best.1, read_filter, base_filter, None, false);
             }
         }
         pos

@@ -233,12 +233,15 @@ pub(crate) trait PileupReadView: ReadView {
     fn base_qual(&self) -> Option<u8>;
 
     /// Whether this observation is a reference skip.
+    #[cfg(feature = "seqair-pileup")]
     fn is_refskip(&self) -> bool;
 
     /// Whether this observation is a deletion or reference skip.
+    #[cfg(feature = "seqair-pileup")]
     fn is_del(&self) -> bool;
 
     /// Whether this observation has an insertion immediately after it.
+    #[cfg(feature = "seqair-pileup")]
     fn has_insertion(&self) -> bool;
 }
 
@@ -281,16 +284,19 @@ impl<'a> PileupReadView for (Alignment<'a>, Record) {
         self.1.qual().get(qpos).copied()
     }
 
+    #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
     fn is_refskip(&self) -> bool {
         self.0.is_refskip()
     }
 
+    #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
     fn is_del(&self) -> bool {
         self.0.is_del()
     }
 
+    #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
     fn has_insertion(&self) -> bool {
         matches!(self.0.indel(), rust_htslib::bam::pileup::Indel::Ins(_))
