@@ -1882,7 +1882,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 [[package]]
 name = "seqair"
 version = "0.1.0"
-source = "git+https://github.com/sstadick/seqair?rev=6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9#6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9"
+source = "git+https://github.com/sstadick/seqair?rev=c1491a3c70492085154680d718eed3b777459738#c1491a3c70492085154680d718eed3b777459738"
 dependencies = [
  "bytemuck",
  "bzip2",
@@ -1902,7 +1902,7 @@ dependencies = [
 [[package]]
 name = "seqair-types"
 version = "0.1.0"
-source = "git+https://github.com/sstadick/seqair?rev=6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9#6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9"
+source = "git+https://github.com/sstadick/seqair?rev=c1491a3c70492085154680d718eed3b777459738#c1491a3c70492085154680d718eed3b777459738"
 dependencies = [
  "bytemuck",
  "serde",

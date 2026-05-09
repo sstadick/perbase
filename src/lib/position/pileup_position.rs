@@ -371,12 +371,15 @@ impl PileupPosition {
     /// Convert a seqair pileup column into a `Position`.
     #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
-    pub fn from_seqair_column<U, F: ReadFilter>(
+    pub fn from_seqair_column<U, A, F: ReadFilter>(
         ref_seq: String,
-        column: &seqair::bam::pileup::PileupColumn<'_, U>,
+        column: &seqair::bam::pileup::PileupColumn<'_, U, A>,
         read_filter: &F,
         base_filter: Option<u8>,
-    ) -> Self {
+    ) -> Self
+    where
+        A: AsRef<[seqair::bam::pileup::PileupAlignment]>,
+    {
         let mut pos = Self::new(ref_seq, *column.pos());
         pos.depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
 
@@ -389,13 +392,16 @@ impl PileupPosition {
     /// Convert a seqair pileup column into a mate-aware `Position`.
     #[cfg(feature = "seqair-pileup")]
     #[inline]
-    pub fn from_seqair_column_mate_aware<U, F: ReadFilter>(
+    pub fn from_seqair_column_mate_aware<U, A, F: ReadFilter>(
         ref_seq: String,
-        column: &seqair::bam::pileup::PileupColumn<'_, U>,
+        column: &seqair::bam::pileup::PileupColumn<'_, U, A>,
         read_filter: &F,
         base_filter: Option<u8>,
         mate_fix_strat: MateResolutionStrategy,
-    ) -> Self {
+    ) -> Self
+    where
+        A: AsRef<[seqair::bam::pileup::PileupAlignment]>,
+    {
         let mut pos = Self::new(ref_seq, *column.pos());
         pos.depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
 

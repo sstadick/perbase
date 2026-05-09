@@ -407,7 +407,8 @@ impl<F: ReadFilter> BaseProcessor<F> {
 
         let mut result = Vec::new();
         if self.mate_fix {
-            while let Some(column) = engine.pileups() {
+            let mut alignments = Vec::new();
+            while let Some(column) = engine.pileups_into(&mut alignments) {
                 let pileup_depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
                 let mut pos = PileupPosition::from_seqair_column_mate_aware(
                     ref_name.clone(),
