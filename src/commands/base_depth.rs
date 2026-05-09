@@ -165,8 +165,19 @@ impl SeqairReaderTemplate {
         start: seqair::bam::Pos0,
         end: seqair::bam::Pos0,
         store: &mut seqair::bam::RecordStore,
+        needs_qname: bool,
     ) -> Result<usize> {
         match self {
+            Self::Indexed(seqair::reader::IndexedReader::Bam(reader)) => {
+                let profile = if needs_qname {
+                    seqair::bam::DecodeProfile::PILEUP_NO_AUX
+                } else {
+                    seqair::bam::DecodeProfile::PILEUP_NO_NAMES_OR_AUX
+                };
+                Ok(reader
+                    .fetch_into_customized_with_profile(tid, start, end, store, &mut (), profile)?
+                    .kept)
+            }
             Self::Indexed(reader) => Ok(reader.fetch_into(tid, start, end, store)?),
             Self::Readers(readers) => Ok(readers.fetch_into(tid, start, end, store)?),
         }
@@ -385,7 +396,7 @@ impl<F: ReadFilter> BaseProcessor<F> {
             .expect("seqair target name")
             .to_owned();
         reader
-            .fetch_into(tid, start_pos, end_pos, &mut store)
+            .fetch_into(tid, start_pos, end_pos, &mut store, self.mate_fix)
             .expect("seqair fetched a region");
         let ref_name = smartstring::alias::String::from(ref_name.as_str());
 
