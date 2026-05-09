@@ -442,6 +442,70 @@ impl PileupPosition {
     }
 }
 
+/// A position produced by seqair's custom pileup accumulator, plus raw pileup depth.
+#[cfg(feature = "seqair-pileup")]
+pub struct SeqairAccumulatedPosition {
+    /// Perbase output position after read/base filtering has been applied.
+    pub position: PileupPosition,
+    /// Raw emitted pileup depth before perbase read/refskip filtering.
+    pub pileup_depth: u32,
+}
+
+/// Accumulate non-mate-aware perbase counts directly from seqair pileup observations.
+#[cfg(feature = "seqair-pileup")]
+pub struct SeqairPileupPositionAccumulator<'a, F> {
+    ref_seq: String,
+    read_filter: &'a F,
+    base_filter: Option<u8>,
+    position: Option<PileupPosition>,
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<'a, F> SeqairPileupPositionAccumulator<'a, F> {
+    /// Create an accumulator for one reference sequence.
+    pub fn new(ref_seq: String, read_filter: &'a F, base_filter: Option<u8>) -> Self {
+        Self {
+            ref_seq,
+            read_filter,
+            base_filter,
+            position: None,
+        }
+    }
+}
+
+#[cfg(feature = "seqair-pileup")]
+impl<U, F: ReadFilter> seqair::bam::pileup::PileupColumnAccumulator<U>
+    for SeqairPileupPositionAccumulator<'_, F>
+{
+    type Output = SeqairAccumulatedPosition;
+
+    fn begin_column(&mut self, pos: seqair::bam::Pos0, _reference_base: seqair_types::Base) {
+        self.position = Some(PileupPosition::new(self.ref_seq.clone(), *pos));
+    }
+
+    fn observe_alignment(
+        &mut self,
+        alignment: seqair::bam::pileup::PileupAlignment,
+        _store: &seqair::bam::RecordStore<U>,
+    ) {
+        let Some(position) = self.position.as_mut() else {
+            return;
+        };
+        position.depth = position.depth.saturating_add(1);
+        position.update_seqair_raw(&alignment, self.read_filter, self.base_filter);
+    }
+
+    fn finish_column(
+        &mut self,
+        context: seqair::bam::pileup::PileupColumnContext<'_, U>,
+    ) -> Option<Self::Output> {
+        Some(SeqairAccumulatedPosition {
+            position: self.position.take()?,
+            pileup_depth: u32::try_from(context.depth()).unwrap_or(u32::MAX),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,6 +1115,31 @@ mod tests {
             panic!("seqair pileup did not yield chr1:1");
         }
 
+        fn seqair_accumulated_position(
+            bam_path: &Path,
+            read_filter: &DefaultReadFilter,
+            base_filter: Option<u8>,
+        ) -> PileupPosition {
+            let mut reader = seqair::reader::IndexedReader::open(bam_path).unwrap();
+            let tid = reader.header().tid("chr1").unwrap();
+            let start = seqair::bam::Pos0::new(0).unwrap();
+            let end = seqair::bam::Pos0::new(0).unwrap();
+            let mut store = seqair::bam::RecordStore::new();
+            reader.fetch_into(tid, start, end, &mut store).unwrap();
+            let mut engine = seqair::bam::pileup::PileupEngine::new(store, start, end);
+            let mut accumulator = SeqairPileupPositionAccumulator::new(
+                String::from("chr1"),
+                read_filter,
+                base_filter,
+            );
+            while let Some(accumulated) = engine.pileup_with(&mut accumulator) {
+                if accumulated.position.pos == 0 {
+                    return accumulated.position;
+                }
+            }
+            panic!("seqair accumulated pileup did not yield chr1:1");
+        }
+
         let tempdir = tempdir().unwrap();
         let bam_path = tempdir.path().join("empty_seq_seqair.bam");
 
@@ -1079,10 +1168,13 @@ mod tests {
         for base_filter in [None, Some(20)] {
             let htslib = htslib_position(&bam_path, &read_filter, base_filter);
             let seqair = seqair_position(&bam_path, &read_filter, base_filter);
+            let seqair_accumulated =
+                seqair_accumulated_position(&bam_path, &read_filter, base_filter);
             assert_eq!(htslib, seqair);
-            assert_eq!(seqair.depth, 2);
-            assert_eq!(seqair.a, 1);
-            assert_eq!(seqair.n, 1);
+            assert_eq!(htslib, seqair_accumulated);
+            assert_eq!(seqair_accumulated.depth, 2);
+            assert_eq!(seqair_accumulated.a, 1);
+            assert_eq!(seqair_accumulated.n, 1);
         }
     }
 }
