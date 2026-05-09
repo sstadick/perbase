@@ -42,8 +42,8 @@ lru_time_cache = "0.11.1"
 num_cpus = "1.13.0"
 rayon = "1.4.0"
 rust-htslib = {version = "0.51", default-features = false, features = ["libdeflate"]}
-seqair = { git = "https://tangled.org/softleif.se/seqair.git", rev = "28766a811596437f685f76aac753f963cde96f7f", optional = true }
-seqair-types = { git = "https://tangled.org/softleif.se/seqair.git", rev = "28766a811596437f685f76aac753f963cde96f7f", optional = true }
+seqair = { version = "0.1.0", optional = true }
+seqair-types = { version = "0.1.0", optional = true }
 rust-lapper = "1.0"
 serde = { version = "1.0.116", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }

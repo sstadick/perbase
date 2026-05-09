@@ -995,13 +995,94 @@ mod tests {
         }
     }
 
-    /// TODO: enable once seqair yields pileup observations for empty SEQ (`*`) reads.
-    /// Current htslib behavior, covered above, counts those reads toward depth as `N`.
-    /// seqair currently appears to drop them because no base/quality exists at qpos.
+    /// seqair 0.1.0 yields `Base::Unknown` / unavailable quality for empty-SEQ (`*`)
+    /// pileup observations, matching htslib/perbase's depth-as-N behavior.
     #[cfg(feature = "seqair-pileup")]
     #[test]
-    #[ignore = "requires upstream seqair empty-SEQ pileup support"]
     fn seqair_empty_seq_matches_htslib_after_upstream_fix() {
-        todo!("construct the empty-SEQ fixture above with seqair and compare against htslib output")
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use std::path::Path;
+        use tempfile::tempdir;
+
+        fn htslib_position(
+            bam_path: &Path,
+            read_filter: &DefaultReadFilter,
+            base_filter: Option<u8>,
+        ) -> PileupPosition {
+            let mut reader = IndexedReader::from_path(bam_path).unwrap();
+            let header_view = reader.header().clone();
+            reader.fetch(("chr1", 0, 1)).unwrap();
+            for pileup_result in reader.pileup() {
+                let pileup = pileup_result.unwrap();
+                if pileup.pos() == 0 {
+                    return PileupPosition::from_pileup(
+                        pileup,
+                        &header_view,
+                        read_filter,
+                        base_filter,
+                    );
+                }
+            }
+            panic!("htslib pileup did not yield chr1:1");
+        }
+
+        fn seqair_position(
+            bam_path: &Path,
+            read_filter: &DefaultReadFilter,
+            base_filter: Option<u8>,
+        ) -> PileupPosition {
+            let mut reader = seqair::reader::IndexedReader::open(bam_path).unwrap();
+            let tid = reader.header().tid("chr1").unwrap();
+            let start = seqair::bam::Pos0::new(0).unwrap();
+            let end = seqair::bam::Pos0::new(0).unwrap();
+            let mut store = seqair::bam::RecordStore::new();
+            reader.fetch_into(tid, start, end, &mut store).unwrap();
+            let mut engine = seqair::bam::pileup::PileupEngine::new(store, start, end);
+            while let Some(column) = engine.pileups() {
+                if *column.pos() == 0 {
+                    return PileupPosition::from_seqair_column(
+                        String::from("chr1"),
+                        &column,
+                        read_filter,
+                        base_filter,
+                    );
+                }
+            }
+            panic!("seqair pileup did not yield chr1:1");
+        }
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("empty_seq_seqair.bam");
+
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        let normal_record = Record::from_sam(
+            &view,
+            b"NORMAL\t0\tchr1\t1\t40\t25M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAA\tIIIIIIIIIIIIIIIIIIIIIIIII",
+        )
+        .unwrap();
+        let empty_seq_record =
+            Record::from_sam(&view, b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*").unwrap();
+
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        writer.write(&normal_record).unwrap();
+        writer.write(&empty_seq_record).unwrap();
+        drop(writer);
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+        for base_filter in [None, Some(20)] {
+            let htslib = htslib_position(&bam_path, &read_filter, base_filter);
+            let seqair = seqair_position(&bam_path, &read_filter, base_filter);
+            assert_eq!(htslib, seqair);
+            assert_eq!(seqair.depth, 2);
+            assert_eq!(seqair.a, 1);
+            assert_eq!(seqair.n, 1);
+        }
     }
 }

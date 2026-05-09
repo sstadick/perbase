@@ -93,7 +93,7 @@ pub struct OnlyDepth {
     #[structopt(long, short = "x")]
     fast_mode: bool,
 
-    /// Use the experimental seqair-backed reader with raw pre-filtering. Requires unmapped reads to be excluded (e.g. -F 4, or -F 3852 instead of -F 3848).
+    /// Use the experimental seqair-backed reader with raw pre-filtering.
     #[cfg(feature = "seqair-pileup")]
     #[structopt(long = "seqair")]
     seqair: bool,
@@ -195,12 +195,6 @@ impl OnlyDepth {
         if self.seqair && path_looks_like_cram(&self.reads) {
             anyhow::bail!(
                 "The experimental seqair only-depth path currently supports BAM input only"
-            );
-        }
-        #[cfg(feature = "seqair-pileup")]
-        if self.seqair && self.exclude_flags & 0x4 == 0 {
-            anyhow::bail!(
-                "The experimental seqair only-depth path requires unmapped reads to be excluded; add -F 4, or use -F 3852 if you would otherwise use -F 3848"
             );
         }
         let cpus = utils::determine_allowed_cpus(self.threads)?;
@@ -347,7 +341,16 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     fn with_seqair(mut self, seqair: bool) -> Result<Self> {
         self.seqair = seqair;
         if seqair {
-            self.seqair_reader_template = Some(seqair::reader::IndexedReader::open(&self.reads)?);
+            let reader = match seqair::reader::IndexedReader::open(&self.reads)? {
+                // `only-depth` consumes raw fetched records (like htslib `view`), not seqair's
+                // pileup stream. Keep placed-unmapped BAM records in the fetch stream and let
+                // perbase's normal read-filter semantics decide whether `-F 4` excludes them.
+                seqair::reader::IndexedReader::Bam(reader) => {
+                    seqair::reader::IndexedReader::Bam(reader.keep_unmapped(true))
+                }
+                reader => reader,
+            };
+            self.seqair_reader_template = Some(reader);
         }
         Ok(self)
     }
@@ -690,6 +693,24 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn seqair_fast_reference_stop(
+        rec: &seqair::bam::record_store::SlimRecord,
+        cigar: &[seqair::bam::CigarOp],
+    ) -> u32 {
+        // Match rust-htslib's `Record::reference_end()` behavior for placed-unmapped
+        // records: even if a CIGAR is present, fast-mode treats the record as a
+        // one-base placed interval. Normal `only-depth` still walks CIGAR blocks.
+        if rec.flags.is_unmapped() {
+            (*rec.pos)
+                .checked_add(1)
+                .expect("seqair unmapped end position overflow")
+        } else {
+            Self::seqair_reference_stop(rec, cigar)
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
     fn merge_seqair_mate_intervals(
         counter: &mut [i32],
         maties: HashMap<String, Vec<Interval<usize, bool>>>,
@@ -716,11 +737,9 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     ) -> Vec<RangePositions> {
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
 
-        for idx in 0..store.len() {
-            let idx = u32::try_from(idx).expect("seqair record index");
-            let rec = store.record(idx);
+        for rec in store.records() {
             let mut ref_pos = *rec.pos;
-            for op in store.cigar(idx) {
+            for op in rec.cigar(&store).expect("seqair CIGAR") {
                 let len = op.len();
                 match op.op_type() {
                     seqair::bam::cigar::CigarOpType::Match
@@ -773,14 +792,13 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties: HashMap<String, Vec<Interval<usize, bool>>> = HashMap::new();
 
-        for idx in 0..store.len() {
-            let idx = u32::try_from(idx).expect("seqair record index");
-            let rec = store.record(idx);
-            let cigar = store.cigar(idx);
+        for rec in store.records() {
+            let cigar = rec.cigar(&store).expect("seqair CIGAR");
             let reference_stop = Self::seqair_reference_stop(rec, cigar);
             let maybe_mate_key = if OnlyDepth::maybe_overlaps_mate_seqair(rec, reference_stop) {
                 Some(String::from(
-                    std::str::from_utf8(store.qname(idx)).expect("Convert qname"),
+                    std::str::from_utf8(rec.qname(&store).expect("seqair qname"))
+                        .expect("Convert qname"),
                 ))
             } else {
                 None
@@ -848,10 +866,9 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     ) -> Vec<RangePositions> {
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
 
-        for idx in 0..store.len() {
-            let idx = u32::try_from(idx).expect("seqair record index");
-            let rec = store.record(idx);
-            let reference_stop = Self::seqair_reference_stop(rec, store.cigar(idx));
+        for rec in store.records() {
+            let reference_stop =
+                Self::seqair_fast_reference_stop(rec, rec.cigar(&store).expect("seqair CIGAR"));
             if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
                 Self::adjusted_seqair_interval(counter.len(), *rec.pos, reference_stop, start, stop)
             {
@@ -878,16 +895,17 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
         let mut maties: HashMap<String, Vec<Interval<usize, bool>>> = HashMap::new();
 
-        for idx in 0..store.len() {
-            let idx = u32::try_from(idx).expect("seqair record index");
-            let rec = store.record(idx);
-            let reference_stop = Self::seqair_reference_stop(rec, store.cigar(idx));
+        for rec in store.records() {
+            let reference_stop =
+                Self::seqair_fast_reference_stop(rec, rec.cigar(&store).expect("seqair CIGAR"));
             if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
                 Self::adjusted_seqair_interval(counter.len(), *rec.pos, reference_stop, start, stop)
             {
                 if OnlyDepth::maybe_overlaps_mate_seqair(rec, reference_stop) {
-                    let qname =
-                        String::from(std::str::from_utf8(store.qname(idx)).expect("Convert qname"));
+                    let qname = String::from(
+                        std::str::from_utf8(rec.qname(&store).expect("seqair qname"))
+                            .expect("Convert qname"),
+                    );
                     maties.entry(qname).or_default().push(Interval {
                         start: adjusted_start,
                         stop: adjusted_stop,
@@ -1380,6 +1398,60 @@ mod tests {
             mate_fix,
             true,
             DefaultReadFilter::new(0, 512, 0),
+        );
+
+        assert_eq!(htslib_positions, seqair_positions);
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[rstest(fast_mode => [false, true])]
+    fn seqair_only_depth_keeps_placed_unmapped_like_htslib_records(fast_mode: bool) {
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("placed_unmapped.bam");
+
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        let records = [
+            Record::from_sam(
+                &view,
+                b"MAPPED\t0\tchr1\t1\t40\t10M\t*\t0\t0\tAAAAAAAAAA\tIIIIIIIIII",
+            )
+            .unwrap(),
+            // Placed-unmapped records can be returned by htslib's raw record iterator after
+            // region fetch. seqair 0.1.0's `keep_unmapped(true)` lets perbase apply the same
+            // user read filters instead of dropping them before `filter_raw`.
+            Record::from_sam(
+                &view,
+                b"PLACED_UNMAPPED\t4\tchr1\t5\t0\t10M\t*\t0\t0\tCCCCCCCCCC\tIIIIIIIIII",
+            )
+            .unwrap(),
+        ];
+
+        let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        for record in &records {
+            writer.write(record).unwrap();
+        }
+        drop(writer);
+        bam::index::build(&bam_path, None, bam::index::Type::Bai, 1).unwrap();
+
+        let htslib_positions = collect_only_depth_tuples(
+            bam_path.clone(),
+            fast_mode,
+            false,
+            false,
+            DefaultReadFilter::new(0, 0, 0),
+        );
+        let seqair_positions = collect_only_depth_tuples(
+            bam_path,
+            fast_mode,
+            false,
+            true,
+            DefaultReadFilter::new(0, 0, 0),
         );
 
         assert_eq!(htslib_positions, seqair_positions);
