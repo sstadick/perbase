@@ -42,8 +42,8 @@ lru_time_cache = "0.11.1"
 num_cpus = "1.13.0"
 rayon = "1.4.0"
 rust-htslib = {version = "0.51", default-features = false, features = ["libdeflate"]}
-seqair = { git = "https://github.com/sstadick/seqair", rev = "6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9", optional = true }
-seqair-types = { git = "https://github.com/sstadick/seqair", rev = "6d9251ccc7681c9ed6b26be24ae61cf59c0a8de9", optional = true }
+seqair = { git = "https://github.com/sstadick/seqair", rev = "dcf26f395b958d2627c0b148f8287c034349f756", optional = true }
+seqair-types = { git = "https://github.com/sstadick/seqair", rev = "dcf26f395b958d2627c0b148f8287c034349f756", optional = true }
 rust-lapper = "1.0"
 serde = { version = "1.0.116", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }

@@ -590,12 +590,21 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             return Vec::new();
         }
 
-        let (store, contig) = self.fetch_seqair_store(tid, start, stop);
         match (self.fast_mode, self.mate_fix) {
-            (false, false) => self.process_seqair_normal_no_mate(store, &contig, start, stop),
-            (false, true) => self.process_seqair_normal_mate_aware(store, &contig, start, stop),
-            (true, false) => self.process_seqair_fast_no_mate(store, &contig, start, stop),
-            (true, true) => self.process_seqair_fast_mate_aware(store, &contig, start, stop),
+            (false, false) => self.process_seqair_raw_normal_no_mate(tid, start, stop),
+            (true, false) => self.process_seqair_raw_fast_no_mate(tid, start, stop),
+            (false, true) | (true, true) => {
+                let (store, contig) = self.fetch_seqair_store(tid, start, stop);
+                match (self.fast_mode, self.mate_fix) {
+                    (false, true) => {
+                        self.process_seqair_normal_mate_aware(store, &contig, start, stop)
+                    }
+                    (true, true) => {
+                        self.process_seqair_fast_mate_aware(store, &contig, start, stop)
+                    }
+                    _ => unreachable!("seqair mate-aware fallback only handles mate-aware modes"),
+                }
+            }
         }
     }
 
@@ -631,6 +640,191 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             .expect("seqair fetched a region");
 
         (store, contig)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn seqair_raw_cigar_ops(
+        raw_cigar_bytes: &[u8],
+    ) -> impl Iterator<Item = seqair::bam::CigarOp> + '_ {
+        raw_cigar_bytes.chunks_exact(4).map(|chunk| {
+            let packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            seqair::bam::CigarOp::from_bam_u32(packed)
+        })
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn seqair_reference_stop_raw(pos: u32, end_pos: u32, raw_cigar_bytes: &[u8]) -> u32 {
+        if Self::seqair_raw_cigar_ops(raw_cigar_bytes).any(|op| op.consumes_ref()) {
+            end_pos
+                .checked_add(1)
+                .expect("seqair raw end position overflow")
+        } else {
+            pos
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn seqair_fast_reference_stop_raw(
+        fields: &seqair::bam::record_store::FilterRawFields<'_>,
+    ) -> u32 {
+        if fields.flags.is_unmapped() {
+            (*fields.pos)
+                .checked_add(1)
+                .expect("seqair raw unmapped end position overflow")
+        } else {
+            Self::seqair_reference_stop_raw(
+                *fields.pos,
+                *fields.end_pos,
+                fields.raw_cigar_bytes.expect("seqair raw CIGAR bytes"),
+            )
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_raw_normal_no_mate(
+        &self,
+        tid: u32,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let start_pos = seqair::bam::Pos0::new(start).expect("seqair start position");
+        let end_pos = seqair::bam::Pos0::new(stop - 1).expect("seqair end position");
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut reader = self
+            .seqair_reader_template
+            .as_ref()
+            .expect("seqair reader template")
+            .fork()
+            .expect("forked seqair reader");
+        let contig = String::from(
+            reader
+                .header()
+                .target_name(tid)
+                .expect("seqair target name"),
+        );
+        let seqair::reader::IndexedReader::Bam(bam_reader) = &mut reader else {
+            unreachable!("only-depth --seqair currently opens BAM readers only");
+        };
+
+        bam_reader
+            .fetch_raw_records(tid, start_pos, end_pos, &mut |fields| {
+                let read = SeqairRawReadView {
+                    flags: fields.flags.raw(),
+                    mapq: fields.mapq,
+                };
+                if !self.read_filter.filter_read(&read) {
+                    return false;
+                }
+
+                let mut ref_pos = *fields.pos;
+                for op in Self::seqair_raw_cigar_ops(
+                    fields.raw_cigar_bytes.expect("seqair raw CIGAR bytes"),
+                ) {
+                    let len = op.len();
+                    match op.op_type() {
+                        seqair::bam::cigar::CigarOpType::Match
+                        | seqair::bam::cigar::CigarOpType::SeqMatch
+                        | seqair::bam::cigar::CigarOpType::SeqMismatch
+                        | seqair::bam::cigar::CigarOpType::Deletion => {
+                            let block_start = ref_pos;
+                            let block_stop =
+                                ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                            if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                                Self::adjusted_seqair_interval(
+                                    counter.len(),
+                                    block_start,
+                                    block_stop,
+                                    start,
+                                    stop,
+                                )
+                            {
+                                Self::add_adjusted_seqair_interval(
+                                    &mut counter,
+                                    adjusted_start,
+                                    adjusted_stop,
+                                    dont_count_stop,
+                                );
+                            }
+                            ref_pos = block_stop;
+                        }
+                        seqair::bam::cigar::CigarOpType::RefSkip => {
+                            ref_pos = ref_pos.checked_add(len).expect("seqair CIGAR overflow");
+                        }
+                        seqair::bam::cigar::CigarOpType::Insertion
+                        | seqair::bam::cigar::CigarOpType::SoftClip
+                        | seqair::bam::cigar::CigarOpType::HardClip
+                        | seqair::bam::cigar::CigarOpType::Padding
+                        | seqair::bam::cigar::CigarOpType::Unknown(_) => {}
+                    }
+                }
+                true
+            })
+            .expect("seqair raw fetched a region");
+
+        self.sum_counter(counter, &contig, start, stop)
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    fn process_seqair_raw_fast_no_mate(
+        &self,
+        tid: u32,
+        start: u32,
+        stop: u32,
+    ) -> Vec<RangePositions> {
+        let start_pos = seqair::bam::Pos0::new(start).expect("seqair start position");
+        let end_pos = seqair::bam::Pos0::new(stop - 1).expect("seqair end position");
+        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+        let mut reader = self
+            .seqair_reader_template
+            .as_ref()
+            .expect("seqair reader template")
+            .fork()
+            .expect("forked seqair reader");
+        let contig = String::from(
+            reader
+                .header()
+                .target_name(tid)
+                .expect("seqair target name"),
+        );
+        let seqair::reader::IndexedReader::Bam(bam_reader) = &mut reader else {
+            unreachable!("only-depth --seqair currently opens BAM readers only");
+        };
+
+        bam_reader
+            .fetch_raw_records(tid, start_pos, end_pos, &mut |fields| {
+                let read = SeqairRawReadView {
+                    flags: fields.flags.raw(),
+                    mapq: fields.mapq,
+                };
+                if !self.read_filter.filter_read(&read) {
+                    return false;
+                }
+
+                let reference_stop = Self::seqair_fast_reference_stop_raw(fields);
+                if let Some((adjusted_start, adjusted_stop, dont_count_stop)) =
+                    Self::adjusted_seqair_interval(
+                        counter.len(),
+                        *fields.pos,
+                        reference_stop,
+                        start,
+                        stop,
+                    )
+                {
+                    Self::add_adjusted_seqair_interval(
+                        &mut counter,
+                        adjusted_start,
+                        adjusted_stop,
+                        dont_count_stop,
+                    );
+                }
+                true
+            })
+            .expect("seqair raw fetched a region");
+
+        self.sum_counter(counter, &contig, start, stop)
     }
 
     #[cfg(feature = "seqair-pileup")]
@@ -728,6 +922,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     #[cfg(feature = "seqair-pileup")]
+    #[allow(
+        dead_code,
+        reason = "raw-record fetch experiment routes no-mate seqair paths around this store-based fallback"
+    )]
     fn process_seqair_normal_no_mate(
         &self,
         store: seqair::bam::RecordStore<()>,
@@ -857,6 +1055,10 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
     }
 
     #[cfg(feature = "seqair-pileup")]
+    #[allow(
+        dead_code,
+        reason = "raw-record fetch experiment routes no-mate seqair paths around this store-based fallback"
+    )]
     fn process_seqair_fast_no_mate(
         &self,
         store: seqair::bam::RecordStore<()>,
