@@ -6,6 +6,8 @@
 use anyhow::Result;
 use bio::io::fasta::IndexedReader;
 use log::*;
+#[cfg(feature = "seqair-pileup")]
+use perbase_lib::position::pileup_position::SeqairPileupPositionAccumulator;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::{Position, mate_fix::MateResolutionStrategy, pileup_position::PileupPosition},
@@ -404,27 +406,30 @@ impl<F: ReadFilter> BaseProcessor<F> {
         engine.set_max_depth(self.max_depth);
 
         let mut result = Vec::new();
-        while let Some(column) = engine.pileups() {
-            let pileup_depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
-            let mut pos = if self.mate_fix {
-                PileupPosition::from_seqair_column_mate_aware(
+        if self.mate_fix {
+            while let Some(column) = engine.pileups() {
+                let pileup_depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
+                let mut pos = PileupPosition::from_seqair_column_mate_aware(
                     ref_name.clone(),
                     &column,
                     &self.read_filter,
                     self.min_base_quality_score,
                     self.mate_fix_strategy,
-                )
-            } else {
-                PileupPosition::from_seqair_column(
-                    ref_name.clone(),
-                    &column,
-                    &self.read_filter,
-                    self.min_base_quality_score,
-                )
-            };
+                );
 
-            self.finalize_pileup_position(&mut pos, pileup_depth);
-            result.push(pos);
+                self.finalize_pileup_position(&mut pos, pileup_depth);
+                result.push(pos);
+            }
+        } else {
+            let mut accumulator = SeqairPileupPositionAccumulator::new(
+                ref_name.clone(),
+                &self.read_filter,
+                self.min_base_quality_score,
+            );
+            while let Some(mut accumulated) = engine.pileup_with(&mut accumulator) {
+                self.finalize_pileup_position(&mut accumulated.position, accumulated.pileup_depth);
+                result.push(accumulated.position);
+            }
         }
 
         self.fill_zero_positions(result, ref_name, start, stop)
