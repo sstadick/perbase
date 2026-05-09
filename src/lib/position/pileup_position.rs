@@ -11,12 +11,12 @@ use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
 use std::default;
 
-use super::mate_fix::{Base, MateResolutionStrategy};
+use super::mate_fix::{Base, MateResolutionStrategy, PileupReadView};
 
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
 // There is no reason to go bigger, for now at least
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Default, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct PileupPosition {
     /// Reference sequence name.
@@ -78,9 +78,103 @@ impl Position for PileupPosition {
 }
 
 impl PileupPosition {
-    /// Given a record, update the counts at this position
+    /// Given a pileup read observation, update the counts at this position.
+    #[cfg(feature = "seqair-pileup")]
     #[inline(always)]
-    fn update<F: ReadFilter>(
+    fn update<R, F>(
+        &mut self,
+        read: &R,
+        read_filter: &F,
+        base_filter: Option<u8>,
+        recommended_base: Option<Base>,
+        mates_resolved: bool,
+    ) where
+        R: PileupReadView + ?Sized,
+        F: ReadFilter,
+    {
+        if !read_filter.filter_read(read) {
+            self.depth -= 1;
+            self.fail += 1;
+            return;
+        }
+        // NB: Order matters here, a refskip is true for both is_del and is_refskip
+        // while a true del is only true for is_del
+        if read.is_refskip() {
+            self.ref_skip += 1;
+            self.depth -= 1;
+        } else if read.is_del() {
+            self.del += 1;
+        } else {
+            // We have an actual base!
+
+            // Check if we are checking the base quality score
+            // && Check if the base quality score is greater or equal to than the cutoff
+            if let Some(base_qual_filter) = base_filter
+                && read.base_qual().is_none_or(|qual| qual < base_qual_filter)
+            {
+                self.n += 1
+            } else if let Some(b) = recommended_base {
+                self.add_base(b);
+            } else if let Some(base) = read.base() {
+                self.add_base(base);
+            } else {
+                self.n += 1;
+            }
+            // Check for insertions
+            if read.has_insertion() {
+                self.ins += 1;
+            }
+        }
+
+        if mates_resolved {
+            self.count_of_mate_resolutions += 1;
+        }
+    }
+
+    /// Given a raw seqair pileup read observation, update the counts at this position.
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn update_seqair_raw<F: ReadFilter>(
+        &mut self,
+        alignment: &seqair::bam::pileup::PileupAlignment,
+        read_filter: &F,
+        base_filter: Option<u8>,
+    ) {
+        if !read_filter.filter_read(alignment) {
+            self.depth -= 1;
+            self.fail += 1;
+            return;
+        }
+
+        match alignment.op() {
+            seqair::bam::pileup::PileupOp::RefSkip => {
+                self.ref_skip += 1;
+                self.depth -= 1;
+            }
+            seqair::bam::pileup::PileupOp::Deletion { .. } => {
+                self.del += 1;
+            }
+            seqair::bam::pileup::PileupOp::ComplexIndel { is_refskip, .. } => {
+                if *is_refskip {
+                    self.ref_skip += 1;
+                    self.depth -= 1;
+                } else {
+                    self.del += 1;
+                }
+            }
+            seqair::bam::pileup::PileupOp::Match { base, qual, .. } => {
+                self.update_seqair_base(*base, *qual, base_filter);
+            }
+            seqair::bam::pileup::PileupOp::Insertion { base, qual, .. } => {
+                self.update_seqair_base(*base, *qual, base_filter);
+                self.ins += 1;
+            }
+        }
+    }
+
+    /// Given an htslib pileup read observation, update the counts at this position.
+    #[inline(always)]
+    fn update_htslib<F: ReadFilter>(
         &mut self,
         alignment: &Alignment,
         record: &Record,
@@ -89,7 +183,7 @@ impl PileupPosition {
         recommended_base: Option<Base>,
         mates_resolved: bool,
     ) {
-        if !read_filter.filter_read(record, Some(alignment)) {
+        if !read_filter.filter_read(record) {
             self.depth -= 1;
             self.fail += 1;
             return;
@@ -112,19 +206,7 @@ impl PileupPosition {
             {
                 self.n += 1
             } else if let Some(b) = recommended_base {
-                match b {
-                    Base::A => self.a += 1,
-                    Base::C => self.c += 1,
-                    Base::T => self.t += 1,
-                    Base::G => self.g += 1,
-                    Base::R => self.r += 1,
-                    Base::Y => self.y += 1,
-                    Base::S => self.s += 1,
-                    Base::W => self.w += 1,
-                    Base::K => self.k += 1,
-                    Base::M => self.m += 1,
-                    _ => self.n += 1,
-                }
+                self.add_base(b);
             } else if record.seq().is_empty() {
                 self.n += 1
             } else {
@@ -144,6 +226,47 @@ impl PileupPosition {
 
         if mates_resolved {
             self.count_of_mate_resolutions += 1;
+        }
+    }
+
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    fn update_seqair_base(
+        &mut self,
+        base: seqair_types::Base,
+        qual: seqair_types::BaseQuality,
+        base_filter: Option<u8>,
+    ) {
+        if let Some(base_qual_filter) = base_filter
+            && qual.get().is_none_or(|qual| qual < base_qual_filter)
+        {
+            self.n += 1;
+            return;
+        }
+
+        match base {
+            seqair_types::Base::A => self.a += 1,
+            seqair_types::Base::C => self.c += 1,
+            seqair_types::Base::G => self.g += 1,
+            seqair_types::Base::T => self.t += 1,
+            seqair_types::Base::Unknown => self.n += 1,
+        }
+    }
+
+    #[inline(always)]
+    fn add_base(&mut self, base: Base) {
+        match base {
+            Base::A => self.a += 1,
+            Base::C => self.c += 1,
+            Base::T => self.t += 1,
+            Base::G => self.g += 1,
+            Base::R => self.r += 1,
+            Base::Y => self.y += 1,
+            Base::S => self.s += 1,
+            Base::W => self.w += 1,
+            Base::K => self.k += 1,
+            Base::M => self.m += 1,
+            _ => self.n += 1,
         }
     }
 
@@ -172,15 +295,7 @@ impl PileupPosition {
 
         for alignment in pileup.alignments() {
             let record = alignment.record();
-            Self::update(
-                &mut pos,
-                &alignment,
-                &record,
-                read_filter,
-                base_filter,
-                None,
-                false,
-            );
+            pos.update_htslib(&alignment, &record, read_filter, base_filter, None, false);
         }
         pos
     }
@@ -221,9 +336,9 @@ impl PileupPosition {
                 let record = aln.record();
                 (aln, record)
             })
-            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
+            .sorted_by(|a, b| Ord::cmp(a.qname(), b.qname()))
             // TODO: I'm not sure there is a good way to remove this allocation
-            .chunk_by(|a| a.1.qname().to_owned());
+            .chunk_by(|a| a.qname().to_owned());
 
         for (_qname, reads) in grouped_by_qname.into_iter() {
             let mut total_reads = 0; // count how many reads there were
@@ -231,14 +346,13 @@ impl PileupPosition {
             let mut reads = reads
                 .inspect(|_| total_reads += 1)
                 .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
-            let best = &reads.next().unwrap();
+            let best = reads.next().unwrap();
 
-            if let Some(second_best) = &reads.next().as_ref() {
+            if let Some(second_best) = reads.next() {
                 // Deal explicitly with mate overlap, they are already ordered correctly
-                let result = mate_fix_strat.cmp(best, second_best, read_filter);
+                let result = mate_fix_strat.cmp(&best, &second_best, read_filter);
                 pos.depth -= total_reads - 1;
-                Self::update(
-                    &mut pos,
+                pos.update_htslib(
                     &best.0,
                     &best.1,
                     read_filter,
@@ -248,15 +362,73 @@ impl PileupPosition {
                 );
             } else {
                 pos.depth -= total_reads - 1;
+                pos.update_htslib(&best.0, &best.1, read_filter, base_filter, None, false);
+            }
+        }
+        pos
+    }
+
+    /// Convert a seqair pileup column into a `Position`.
+    #[cfg(feature = "seqair-pileup")]
+    #[inline(always)]
+    pub fn from_seqair_column<U, F: ReadFilter>(
+        ref_seq: String,
+        column: &seqair::bam::pileup::PileupColumn<'_, U>,
+        read_filter: &F,
+        base_filter: Option<u8>,
+    ) -> Self {
+        let mut pos = Self::new(ref_seq, *column.pos());
+        pos.depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
+
+        for alignment in column.raw_alignments() {
+            pos.update_seqair_raw(alignment, read_filter, base_filter);
+        }
+        pos
+    }
+
+    /// Convert a seqair pileup column into a mate-aware `Position`.
+    #[cfg(feature = "seqair-pileup")]
+    #[inline]
+    pub fn from_seqair_column_mate_aware<U, F: ReadFilter>(
+        ref_seq: String,
+        column: &seqair::bam::pileup::PileupColumn<'_, U>,
+        read_filter: &F,
+        base_filter: Option<u8>,
+        mate_fix_strat: MateResolutionStrategy,
+    ) -> Self {
+        let mut pos = Self::new(ref_seq, *column.pos());
+        pos.depth = u32::try_from(column.depth()).unwrap_or(u32::MAX);
+
+        // Group records by qname
+        let grouped_by_qname = column
+            .alignments()
+            .sorted_by(|a, b| Ord::cmp(a.qname(), b.qname()))
+            // TODO: I'm not sure there is a good way to remove this allocation
+            .chunk_by(|a| a.qname().to_owned());
+
+        for (_qname, reads) in grouped_by_qname.into_iter() {
+            let mut total_reads = 0; // count how many reads there were
+
+            let mut reads = reads
+                .inspect(|_| total_reads += 1)
+                .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
+            let best = reads.next().unwrap();
+
+            if let Some(second_best) = reads.next() {
+                // Deal explicitly with mate overlap, they are already ordered correctly
+                let result = mate_fix_strat.cmp(&best, &second_best, read_filter);
+                pos.depth -= total_reads - 1;
                 Self::update(
                     &mut pos,
-                    &best.0,
-                    &best.1,
+                    &best,
                     read_filter,
                     base_filter,
-                    None,
-                    false,
+                    result.recommended_base,
+                    true,
                 );
+            } else {
+                pos.depth -= total_reads - 1;
+                Self::update(&mut pos, &best, read_filter, base_filter, None, false);
             }
         }
         pos
@@ -820,6 +992,97 @@ mod tests {
                 }
                 break;
             }
+        }
+    }
+
+    /// seqair 0.1.0 yields `Base::Unknown` / unavailable quality for empty-SEQ (`*`)
+    /// pileup observations, matching htslib/perbase's depth-as-N behavior.
+    #[cfg(feature = "seqair-pileup")]
+    #[test]
+    fn seqair_empty_seq_matches_htslib_after_upstream_fix() {
+        use rust_htslib::bam::{IndexedReader, Writer, index};
+        use std::path::Path;
+        use tempfile::tempdir;
+
+        fn htslib_position(
+            bam_path: &Path,
+            read_filter: &DefaultReadFilter,
+            base_filter: Option<u8>,
+        ) -> PileupPosition {
+            let mut reader = IndexedReader::from_path(bam_path).unwrap();
+            let header_view = reader.header().clone();
+            reader.fetch(("chr1", 0, 1)).unwrap();
+            for pileup_result in reader.pileup() {
+                let pileup = pileup_result.unwrap();
+                if pileup.pos() == 0 {
+                    return PileupPosition::from_pileup(
+                        pileup,
+                        &header_view,
+                        read_filter,
+                        base_filter,
+                    );
+                }
+            }
+            panic!("htslib pileup did not yield chr1:1");
+        }
+
+        fn seqair_position(
+            bam_path: &Path,
+            read_filter: &DefaultReadFilter,
+            base_filter: Option<u8>,
+        ) -> PileupPosition {
+            let mut reader = seqair::reader::IndexedReader::open(bam_path).unwrap();
+            let tid = reader.header().tid("chr1").unwrap();
+            let start = seqair::bam::Pos0::new(0).unwrap();
+            let end = seqair::bam::Pos0::new(0).unwrap();
+            let mut store = seqair::bam::RecordStore::new();
+            reader.fetch_into(tid, start, end, &mut store).unwrap();
+            let mut engine = seqair::bam::pileup::PileupEngine::new(store, start, end);
+            while let Some(column) = engine.pileups() {
+                if *column.pos() == 0 {
+                    return PileupPosition::from_seqair_column(
+                        String::from("chr1"),
+                        &column,
+                        read_filter,
+                        base_filter,
+                    );
+                }
+            }
+            panic!("seqair pileup did not yield chr1:1");
+        }
+
+        let tempdir = tempdir().unwrap();
+        let bam_path = tempdir.path().join("empty_seq_seqair.bam");
+
+        let mut header = bam::header::Header::new();
+        let mut chr1 = bam::header::HeaderRecord::new(b"SQ");
+        chr1.push_tag(b"SN", &"chr1".to_owned());
+        chr1.push_tag(b"LN", &"100".to_owned());
+        header.push_record(&chr1);
+        let view = bam::HeaderView::from_header(&header);
+
+        let normal_record = Record::from_sam(
+            &view,
+            b"NORMAL\t0\tchr1\t1\t40\t25M\t*\t0\t0\tAAAAAAAAAAAAAAAAAAAAAAAAA\tIIIIIIIIIIIIIIIIIIIIIIIII",
+        )
+        .unwrap();
+        let empty_seq_record =
+            Record::from_sam(&view, b"EMPTY_SEQ\t0\tchr1\t1\t40\t25M\t*\t0\t0\t*\t*").unwrap();
+
+        let mut writer = Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+        writer.write(&normal_record).unwrap();
+        writer.write(&empty_seq_record).unwrap();
+        drop(writer);
+        index::build(&bam_path, None, index::Type::Bai, 1).unwrap();
+
+        let read_filter = DefaultReadFilter::new(0, 0, 0);
+        for base_filter in [None, Some(20)] {
+            let htslib = htslib_position(&bam_path, &read_filter, base_filter);
+            let seqair = seqair_position(&bam_path, &read_filter, base_filter);
+            assert_eq!(htslib, seqair);
+            assert_eq!(seqair.depth, 2);
+            assert_eq!(seqair.a, 1);
+            assert_eq!(seqair.n, 1);
         }
     }
 }

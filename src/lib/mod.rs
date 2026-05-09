@@ -15,9 +15,9 @@
 //! use perbase_lib::{
 //!     par_granges::{self, RegionProcessor},
 //!     position::pileup_position::PileupPosition,
-//!     read_filter::ReadFilter,
+//!     read_filter::{ReadFilter, ReadView},
 //! };
-//! use rust_htslib::bam::{self, record::Record, Read, pileup::Alignment};
+//! use rust_htslib::bam::{self, Read};
 //! use std::path::PathBuf;
 //!
 //! // To use ParGranges you will need to implement a [`RegionProcessor`](par_granges::RegionProcessor),
@@ -44,11 +44,11 @@
 //! impl ReadFilter for BasicReadFilter {
 //!     // Filter reads based SAM flags and mapping quality, true means pass
 //!     #[inline]
-//!     fn filter_read(&self, read: &Record, _: Option<&Alignment>) -> bool {
+//!     fn filter_read<R: ReadView + ?Sized>(&self, read: &R) -> bool {
 //!         let flags = read.flags();
-//!         (!flags) & &self.include_flags == 0
-//!             && flags & &self.exclude_flags == 0
-//!             && &read.mapq() >= &self.min_mapq
+//!         (!flags) & self.include_flags == 0
+//!             && flags & self.exclude_flags == 0
+//!             && read.mapq() >= self.min_mapq
 //!     }
 //! }
 //!
