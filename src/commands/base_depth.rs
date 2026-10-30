@@ -268,16 +268,6 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                                 self.min_base_quality_score,
                             )
                         };
-                        // Add the ref base if reference is available
-                        if let Some(buffer) = &self.ref_buffer {
-                            let seq = buffer
-                                .seq(&pos.ref_seq)
-                                .expect("Fetched reference sequence");
-                            pos.ref_base = Some(char::from(
-                                *seq.get(pos.pos as usize)
-                                    .expect("Input SAM does not match reference"),
-                            ));
-                        }
                         if pileup_depth > (self.max_depth_warnings_cutoff) {
                             pos.near_max_depth = true;
                         }
@@ -289,7 +279,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                 })
                 .collect();
 
-            if self.keep_zeros {
+            let mut result = if self.keep_zeros {
                 let mut new_result = vec![];
                 let name = PileupPosition::compact_refseq(&header, tid);
                 let mut pos = start;
@@ -309,7 +299,23 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                 new_result
             } else {
                 result
+            };
+
+            // Annotate all output positions, including uncovered bases added above.
+            if let Some(buffer) = &self.ref_buffer
+                && let Some(first) = result.first()
+            {
+                let seq = buffer
+                    .seq(&first.ref_seq)
+                    .expect("Fetched reference sequence");
+                for pos in &mut result {
+                    pos.ref_base = Some(char::from(
+                        *seq.get((pos.pos - self.coord_base) as usize)
+                            .expect("Input SAM does not match reference"),
+                    ));
+                }
             }
+            result
         })
     }
 }
@@ -325,6 +331,100 @@ mod tests {
     use smartstring::alias::*;
     use std::{collections::HashMap, path::PathBuf};
     use tempfile::{TempDir, tempdir};
+
+    #[rstest]
+    fn reference_bases_in_output(
+        #[values("bam", "cram")] format: &str,
+        #[values(false, true)] zero_base: bool,
+        #[values(false, true)] keep_zeros: bool,
+    ) {
+        let dir = tempdir().unwrap();
+        let reference = dir.path().join("reference.fa");
+        std::fs::write(&reference, ">chr1\nACGTACGTAA\n>chr2\nTTGCAATGCC\n").unwrap();
+        rust_htslib::faidx::build(&reference).unwrap();
+        let mut header = bam::Header::new();
+        for name in ["chr1", "chr2"] {
+            header.push_record(
+                bam::header::HeaderRecord::new(b"SQ")
+                    .push_tag(b"SN", name)
+                    .push_tag(b"LN", 10)
+                    .push_tag(b"UR", reference.to_str().unwrap()),
+            );
+        }
+        let reads = dir.path().join(format!("reads.{format}"));
+        let mut writer = bam::Writer::from_path(
+            &reads,
+            &header,
+            if format == "bam" {
+                bam::Format::Bam
+            } else {
+                bam::Format::Cram
+            },
+        )
+        .unwrap();
+        writer.set_reference(&reference).unwrap();
+        let view = bam::HeaderView::from_header(&header);
+        for pos in [3, 7] {
+            let record = Record::from_sam(
+                &view,
+                format!("read{pos}\t0\tchr1\t{pos}\t60\t2M\t*\t0\t0\tGT\tII").as_bytes(),
+            )
+            .unwrap();
+            writer.write(&record).unwrap();
+        }
+        drop(writer);
+        bam::index::build(&reads, None, bam::index::Type::Bai, 1).unwrap();
+        let output = dir.path().join("output.tsv");
+        let mut args = vec![
+            "base-depth",
+            reads.to_str().unwrap(),
+            "-r",
+            reference.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "-t",
+            "3",
+            "-c",
+            "3",
+            "-C",
+            "0.001",
+        ];
+        if zero_base {
+            args.push("-z");
+        }
+        if keep_zeros {
+            args.push("-k");
+        }
+        BaseDepth::from_iter_safe(args).unwrap().run().unwrap();
+
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .from_path(output)
+            .unwrap();
+        let headers = reader.headers().unwrap().clone();
+        let ref_base = headers.iter().position(|h| h == "REF_BASE").unwrap();
+        let depth = headers.iter().position(|h| h == "DEPTH").unwrap();
+        let rows = reader
+            .records()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let mut expected = vec![];
+        for (name, sequence) in [("chr1", "ACGTACGTAA"), ("chr2", "TTGCAATGCC")] {
+            for (pos, base) in sequence.chars().enumerate() {
+                let expected_depth = u32::from(name == "chr1" && [2, 3, 6, 7].contains(&pos));
+                if keep_zeros || expected_depth > 0 {
+                    expected.push((name, pos + usize::from(!zero_base), base, expected_depth));
+                }
+            }
+        }
+        assert_eq!(rows.len(), expected.len());
+        for (row, (name, pos, base, expected_depth)) in rows.iter().zip(expected) {
+            assert_eq!(&row[0], name);
+            assert_eq!(row[1].parse::<usize>().unwrap(), pos);
+            assert_eq!(&row[ref_base], base.to_string());
+            assert_eq!(row[depth].parse::<u32>().unwrap(), expected_depth);
+        }
+    }
 
     #[fixture]
     fn read_filter() -> DefaultReadFilter {
