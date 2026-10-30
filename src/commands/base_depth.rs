@@ -12,7 +12,7 @@ use perbase_lib::{
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
-use rust_htslib::{bam, bam::Read};
+use rust_htslib::bam::Read;
 use std::{convert::TryInto, path::PathBuf};
 use structopt::{StructOpt, clap::AppSettings};
 
@@ -239,85 +239,78 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
     /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<PileupPosition> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
-        // Create a reader
-        let mut reader =
-            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
-
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta).expect("Set ref");
-        }
-
-        let header = reader.header().to_owned();
-        // fetch the region of interest
-        reader.fetch((tid, start, stop)).expect("Fetched a region");
-        // Walk over pileups
-        let mut pileup = reader.pileup();
-        pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
-        let result: Vec<PileupPosition> = pileup
-            .flat_map(|p| {
-                let pileup = p.expect("Extracted a pileup");
-                // Verify that we are within the bounds of the chunk we are iterating on
-                let pileup_depth = pileup.depth();
-                if pileup.pos() >= start && pileup.pos() < stop {
-                    let mut pos = if self.mate_fix {
-                        PileupPosition::from_pileup_mate_aware(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                            self.min_base_quality_score,
-                            self.mate_fix_strategy,
-                        )
+        utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
+            let header = reader.header().to_owned();
+            // fetch the region of interest
+            reader.fetch((tid, start, stop)).expect("Fetched a region");
+            // Walk over pileups
+            let mut pileup = reader.pileup();
+            pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
+            let result: Vec<PileupPosition> = pileup
+                .flat_map(|p| {
+                    let pileup = p.expect("Extracted a pileup");
+                    // Verify that we are within the bounds of the chunk we are iterating on
+                    let pileup_depth = pileup.depth();
+                    if pileup.pos() >= start && pileup.pos() < stop {
+                        let mut pos = if self.mate_fix {
+                            PileupPosition::from_pileup_mate_aware(
+                                pileup,
+                                &header,
+                                &self.read_filter,
+                                self.min_base_quality_score,
+                                self.mate_fix_strategy,
+                            )
+                        } else {
+                            PileupPosition::from_pileup(
+                                pileup,
+                                &header,
+                                &self.read_filter,
+                                self.min_base_quality_score,
+                            )
+                        };
+                        // Add the ref base if reference is available
+                        if let Some(buffer) = &self.ref_buffer {
+                            let seq = buffer
+                                .seq(&pos.ref_seq)
+                                .expect("Fetched reference sequence");
+                            pos.ref_base = Some(char::from(
+                                *seq.get(pos.pos as usize)
+                                    .expect("Input SAM does not match reference"),
+                            ));
+                        }
+                        if pileup_depth > (self.max_depth_warnings_cutoff) {
+                            pos.near_max_depth = true;
+                        }
+                        pos.pos += self.coord_base;
+                        Some(pos)
                     } else {
-                        PileupPosition::from_pileup(
-                            pileup,
-                            &header,
-                            &self.read_filter,
-                            self.min_base_quality_score,
-                        )
-                    };
-                    // Add the ref base if reference is available
-                    if let Some(buffer) = &self.ref_buffer {
-                        let seq = buffer
-                            .seq(&pos.ref_seq)
-                            .expect("Fetched reference sequence");
-                        pos.ref_base = Some(char::from(
-                            *seq.get(pos.pos as usize)
-                                .expect("Input SAM does not match reference"),
-                        ));
+                        None
                     }
-                    if pileup_depth > (self.max_depth_warnings_cutoff) {
-                        pos.near_max_depth = true;
+                })
+                .collect();
+
+            if self.keep_zeros {
+                let mut new_result = vec![];
+                let name = PileupPosition::compact_refseq(&header, tid);
+                let mut pos = start;
+
+                for position in result.into_iter() {
+                    while pos < (position.pos - self.coord_base) {
+                        new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
+                        pos += 1;
                     }
-                    pos.pos += self.coord_base;
-                    Some(pos)
-                } else {
-                    None
+                    new_result.push(position);
+                    pos += 1;
                 }
-            })
-            .collect();
-
-        if self.keep_zeros {
-            let mut new_result = vec![];
-            let name = PileupPosition::compact_refseq(&header, tid);
-            let mut pos = start;
-
-            for position in result.into_iter() {
-                while pos < (position.pos - self.coord_base) {
+                while pos < stop {
                     new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
                     pos += 1;
                 }
-                new_result.push(position);
-                pos += 1;
+                new_result
+            } else {
+                result
             }
-            while pos < stop {
-                new_result.push(PileupPosition::new(name.clone(), pos + self.coord_base));
-                pos += 1;
-            }
-            new_result
-        } else {
-            result
-        }
+        })
     }
 }
 
