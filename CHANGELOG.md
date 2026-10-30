@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## Unreleased
+
+- Performance: reuse one indexed BAM/CRAM reader per worker thread in `base-depth` and both `only-depth` modes instead of reopening the input for every region ([#110](https://github.com/sstadick/perbase/issues/110)).
+
 ## 1.4.0
 
 - [fix](https://github.com/sstadick/perbase/pull/104): properly parse args by revering global structopt setting from @chenrui333

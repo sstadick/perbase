@@ -288,173 +288,159 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
 
     /// Process a region, taking into account REF_SKIPs and mates
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        // Create a reader
-        let mut reader =
-            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+        utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
+            let header = reader.header().to_owned();
+            // fetch the region of interest
+            reader.fetch((tid, start, stop)).expect("Fetched a region");
 
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta).expect("Set ref");
-        }
+            let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+            let mut maties = HashMap::new();
 
-        let header = reader.header().to_owned();
-        // fetch the region of interest
-        reader.fetch((tid, start, stop)).expect("Fetched a region");
+            // Walk over each read, counting the starts and ends
+            for record in reader
+                .rc_records()
+                .map(|r| r.expect("Read record"))
+                .filter(|read| self.read_filter.filter_read(read, None))
+                .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
+            {
+                let rec_start = u32::try_from(record.0).expect("check overflow");
+                let rec_stop = u32::try_from(record.1).expect("check overflow");
 
-        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-        let mut maties = HashMap::new();
-
-        // Walk over each read, counting the starts and ends
-        for record in reader
-            .rc_records()
-            .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(read, None))
-            .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
-        {
-            let rec_start = u32::try_from(record.0).expect("check overflow");
-            let rec_stop = u32::try_from(record.1).expect("check overflow");
-
-            // NB: since we are splitting the region, it's possible the region we are looking at
-            // may occur before the ROI, or after the ROI
-            if rec_start >= stop || rec_stop <= start {
-                continue;
-            }
-
-            // rectify start / stop with region boundaries
-            // increment the start of the region
-            let adjusted_start = if rec_start < start {
-                0
-            } else {
-                (rec_start - start) as usize
-            };
-
-            let mut dont_count_stop = false; // if this interval extends past the end of the region, don't count an end for it
-            let adjusted_stop = if rec_stop >= stop {
-                dont_count_stop = true;
-                counter.len() - 1
-            } else {
-                (rec_stop - start) as usize
-            };
-
-            // check if this read has a mate that will be seen within this region
-            // that this works for both mates in pair
-            if self.mate_fix && record.2 {
-                // TODO: figure out better way of passing qname around, get rid of Lazy
-                // let qname = String::from(std::str::from_utf8(record.3).expect("Convert qname"));
-                let intervals = maties.entry(record.3).or_insert(vec![]);
-                intervals.push(Interval {
-                    start: adjusted_start,
-                    stop: adjusted_stop,
-                    val: dont_count_stop,
-                });
-            } else {
-                counter[adjusted_start] += 1;
-                if !dont_count_stop {
-                    // check if the end of interval extended past region end
-                    counter[adjusted_stop] -= 1;
+                // NB: since we are splitting the region, it's possible the region we are looking at
+                // may occur before the ROI, or after the ROI
+                if rec_start >= stop || rec_stop <= start {
+                    continue;
                 }
-            }
-        }
 
-        if self.mate_fix {
-            // check maties
-            for (_qname, ivs) in maties.drain() {
-                let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
-                for iv in lapper.intervals {
-                    counter[iv.start] += 1;
-                    if !iv.val {
+                // rectify start / stop with region boundaries
+                // increment the start of the region
+                let adjusted_start = if rec_start < start {
+                    0
+                } else {
+                    (rec_start - start) as usize
+                };
+
+                let mut dont_count_stop = false; // if this interval extends past the end of the region, don't count an end for it
+                let adjusted_stop = if rec_stop >= stop {
+                    dont_count_stop = true;
+                    counter.len() - 1
+                } else {
+                    (rec_stop - start) as usize
+                };
+
+                // check if this read has a mate that will be seen within this region
+                // that this works for both mates in pair
+                if self.mate_fix && record.2 {
+                    // TODO: figure out better way of passing qname around, get rid of Lazy
+                    // let qname = String::from(std::str::from_utf8(record.3).expect("Convert qname"));
+                    let intervals = maties.entry(record.3).or_insert(vec![]);
+                    intervals.push(Interval {
+                        start: adjusted_start,
+                        stop: adjusted_stop,
+                        val: dont_count_stop,
+                    });
+                } else {
+                    counter[adjusted_start] += 1;
+                    if !dont_count_stop {
                         // check if the end of interval extended past region end
-                        counter[iv.stop] -= 1;
+                        counter[adjusted_stop] -= 1;
                     }
                 }
             }
-        }
 
-        // Sum the counter and merge same-depth ranges of positions
-        let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-        self.sum_counter(counter, contig, start, stop)
+            if self.mate_fix {
+                // check maties
+                for (_qname, ivs) in maties.drain() {
+                    let mut lapper = Lapper::new(ivs);
+                    lapper.merge_overlaps();
+                    for iv in lapper.intervals {
+                        counter[iv.start] += 1;
+                        if !iv.val {
+                            // check if the end of interval extended past region end
+                            counter[iv.stop] -= 1;
+                        }
+                    }
+                }
+            }
+
+            // Sum the counter and merge same-depth ranges of positions
+            let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
+            self.sum_counter(counter, contig, start, stop)
+        })
     }
 
     fn process_region_fast(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        // Create a reader
-        let mut reader =
-            bam::IndexedReader::from_path(&self.reads).expect("Indexed Reader for region");
+        utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
+            let header = reader.header().to_owned();
+            // fetch the region of interest
+            reader.fetch((tid, start, stop)).expect("Fetched a region");
 
-        // If passed add ref_fasta
-        if let Some(ref_fasta) = &self.ref_fasta {
-            reader.set_reference(ref_fasta).expect("Set ref");
-        }
+            let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
+            let mut maties = HashMap::new();
 
-        let header = reader.header().to_owned();
-        // fetch the region of interest
-        reader.fetch((tid, start, stop)).expect("Fetched a region");
+            // Walk over each read, counting the starts and ends
+            for record in reader
+                .rc_records()
+                .map(|r| r.expect("Read record"))
+                .filter(|read| self.read_filter.filter_read(read, None))
+            {
+                let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
+                let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");
 
-        let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-        let mut maties = HashMap::new();
+                // rectify start / stop with region boundaries
+                // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
+                let adjusted_start = if rec_start < start {
+                    0
+                } else {
+                    (rec_start - start) as usize
+                };
 
-        // Walk over each read, counting the starts and ends
-        for record in reader
-            .rc_records()
-            .map(|r| r.expect("Read record"))
-            .filter(|read| self.read_filter.filter_read(read, None))
-        {
-            let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
-            let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");
+                let mut dont_count_stop = false; // set this flag if this interval extends past the end of our region
+                let adjusted_stop = if rec_stop >= stop {
+                    dont_count_stop = true;
+                    counter.len() - 1
+                } else {
+                    (rec_stop - start) as usize
+                };
 
-            // rectify start / stop with region boundaries
-            // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
-            let adjusted_start = if rec_start < start {
-                0
-            } else {
-                (rec_start - start) as usize
-            };
-
-            let mut dont_count_stop = false; // set this flag if this interval extends past the end of our region
-            let adjusted_stop = if rec_stop >= stop {
-                dont_count_stop = true;
-                counter.len() - 1
-            } else {
-                (rec_stop - start) as usize
-            };
-
-            // check if this read has a mate that will be seen within this region
-            if self.mate_fix && OnlyDepth::maybe_overlaps_mate(&record) {
-                let qname =
-                    String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
-                let intervals = maties.entry(qname).or_insert(vec![]);
-                intervals.push(Interval {
-                    start: adjusted_start,
-                    stop: adjusted_stop,
-                    val: dont_count_stop,
-                });
-            } else {
-                counter[adjusted_start] += 1;
-                // Check if end of interval extended past region end
-                if !dont_count_stop {
-                    counter[adjusted_stop] -= 1;
-                }
-            }
-        }
-
-        if self.mate_fix {
-            // check maties
-            for (_qname, ivs) in maties.drain() {
-                let mut lapper = Lapper::new(ivs);
-                lapper.merge_overlaps();
-                for iv in lapper.intervals {
-                    counter[iv.start] += 1;
+                // check if this read has a mate that will be seen within this region
+                if self.mate_fix && OnlyDepth::maybe_overlaps_mate(&record) {
+                    let qname =
+                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
+                    let intervals = maties.entry(qname).or_insert(vec![]);
+                    intervals.push(Interval {
+                        start: adjusted_start,
+                        stop: adjusted_stop,
+                        val: dont_count_stop,
+                    });
+                } else {
+                    counter[adjusted_start] += 1;
                     // Check if end of interval extended past region end
-                    if !iv.val {
-                        counter[iv.stop] -= 1;
+                    if !dont_count_stop {
+                        counter[adjusted_stop] -= 1;
                     }
                 }
             }
-        }
 
-        // Sum the counter and merge same-depth ranges of positions
-        let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-        self.sum_counter(counter, contig, start, stop)
+            if self.mate_fix {
+                // check maties
+                for (_qname, ivs) in maties.drain() {
+                    let mut lapper = Lapper::new(ivs);
+                    lapper.merge_overlaps();
+                    for iv in lapper.intervals {
+                        counter[iv.start] += 1;
+                        // Check if end of interval extended past region end
+                        if !iv.val {
+                            counter[iv.stop] -= 1;
+                        }
+                    }
+                }
+            }
+
+            // Sum the counter and merge same-depth ranges of positions
+            let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
+            self.sum_counter(counter, contig, start, stop)
+        })
     }
 }
 
