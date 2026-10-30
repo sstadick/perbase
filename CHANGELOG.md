@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Performance: reuse one indexed BAM/CRAM reader per worker thread in `base-depth` and both `only-depth` modes instead of reopening the input for every region ([#110](https://github.com/sstadick/perbase/issues/110)).
+- Fix: populate `REF_BASE` for uncovered positions in `base-depth --keep-zeros` when a reference is supplied, avoiding inconsistent TSV column counts.
 
 ## 1.4.0
 
