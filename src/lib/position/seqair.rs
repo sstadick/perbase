@@ -8,21 +8,18 @@ use crate::read_filter::DefaultReadFilter;
 use ::seqair::{
     bam::{
         pileup::{PileupAlignment, PileupEngine},
-        record_store::{CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord},
+        record_store::{
+            CustomizeRecordStore, FilterRawFields, RecordStore, SlimRecord, qname_hash,
+        },
     },
     reader::{IndexedReader, ResolveTid},
 };
 use anyhow::{Context, Result};
 use seqair_types::Pos0;
-use std::{
-    cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
-    path::Path,
-    sync::Mutex,
-};
+use std::{cmp::Reverse, collections::BinaryHeap, path::Path, sync::Mutex};
 
-/// Reads indexed regions with Seqair and counts their bases. The template
-/// shares the parsed header and index; each region gets its own file handle.
+/// Reads indexed regions with Seqair and counts their bases. Workers share
+/// the parsed header and index, but own their file handles and read buffers.
 pub struct SeqairCounter {
     template: Mutex<IndexedReader>,
     filter: DefaultReadFilter,
@@ -59,64 +56,148 @@ impl SeqairCounter {
     /// are zero-based; the caller adds coordinate conversion, uncovered rows
     /// and reference annotations just as it does for HTSlib results.
     pub fn count_region(&self, tid: u32, start: u32, stop: u32) -> Result<Vec<PileupPosition>> {
+        let mut positions = Vec::new();
+        self.worker()?
+            .for_each_position(tid, start, stop, |position| {
+                positions.push(position);
+                Ok(())
+            })?;
+        Ok(positions)
+    }
+
+    /// Create a worker whose reader and allocations can be reused across regions.
+    pub fn worker(&self) -> Result<SeqairWorker<'_>> {
+        Ok(SeqairWorker {
+            counter: self,
+            reader: self.template.lock().expect("Seqair reader lock").fork()?,
+            store: RecordStore::new(),
+            admission: Admission {
+                ends: BinaryHeap::new(),
+                previous: None,
+                limit: self.max_depth.min(i32::MAX as u32) as usize,
+                filter: self.filter,
+            },
+            info: Vec::new(),
+            names: Vec::new(),
+            heads: Vec::new(),
+            links: Vec::new(),
+            active: Vec::new(),
+            members: Vec::new(),
+        })
+    }
+}
+
+/// A single counting worker. No output rows are retained between callbacks.
+pub struct SeqairWorker<'a> {
+    counter: &'a SeqairCounter,
+    reader: IndexedReader,
+    store: RecordStore<ReadInfo>,
+    admission: Admission,
+    info: Vec<ReadInfo>,
+    names: Vec<usize>,
+    heads: Vec<usize>,
+    links: Vec<usize>,
+    active: Vec<usize>,
+    members: Vec<usize>,
+}
+
+impl SeqairWorker<'_> {
+    /// Count `[start, stop)` and immediately pass each zero-based row to `emit`.
+    /// The callback may stop processing by returning an error, such as a failed
+    /// output write. Read storage is reused on the next successful region.
+    pub fn for_each_position(
+        &mut self,
+        tid: u32,
+        start: u32,
+        stop: u32,
+        mut emit: impl FnMut(PileupPosition) -> Result<()>,
+    ) -> Result<()> {
         anyhow::ensure!(start <= stop, "region start must not exceed its end");
         if start == stop {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let start = Pos0::new(start).context("region start exceeds Seqair's coordinate range")?;
         let last = Pos0::new(stop - 1).context("region end exceeds Seqair's coordinate range")?;
-        let mut reader = self.template.lock().expect("Seqair reader lock").fork()?;
-        let tid = tid.resolve_tid(reader.header())?;
-        let name = reader
+        let tid = tid.resolve_tid(self.reader.header())?;
+        let name = self
+            .reader
             .header()
             .target_name(tid)
             .context("unknown Seqair reference")?
             .to_owned();
-        let mut store = RecordStore::new();
-        let mut admission = Admission {
-            ends: BinaryHeap::new(),
-            previous: None,
-            limit: self.max_depth.min(i32::MAX as u32) as usize,
-            names: HashMap::new(),
-            filter: self.filter,
-            group_mates: self.strategy.is_some(),
-        };
-        reader.fetch_into_customized(tid, (start..=last).into(), &mut store, &mut admission)?;
-        let prepared = store.prepare_for_pileup();
-        // Resolve name groups and filters once per read, not once per base.
-        // Do not use Seqair's mate links: Perbase groups every same-name read,
-        // including secondary and unpaired alignments.
-        let info: Vec<_> = prepared
-            .input
-            .store()
-            .indices()
-            .map(|index| *prepared.input.store().record(index).unwrap().extra())
-            .collect();
-        let mut groups = vec![Vec::<usize>::new(); admission.names.len()];
-        drop(admission);
-        let mut active = Vec::new();
+        self.admission.ends.clear();
+        self.admission.previous = None;
+        self.reader.fetch_into_customized(
+            tid,
+            (start..=last).into(),
+            &mut self.store,
+            &mut self.admission,
+        )?;
+        let prepared = std::mem::take(&mut self.store).prepare_for_pileup();
+        let store = prepared.input.store();
+        self.info.clear();
+        self.info.extend(
+            store
+                .indices()
+                .map(|index| *store.record(index).unwrap().extra()),
+        );
+        if self.counter.strategy.is_some() {
+            // Store record indices in the name table, not copies of names.
+            // Exact byte comparison resolves collisions and includes unpaired
+            // and secondary reads, unlike primary-mate links.
+            let capacity = (store.len() * 2).next_power_of_two();
+            self.names.clear();
+            self.names.resize(capacity, usize::MAX);
+            self.heads.clear();
+            self.heads.resize(store.len(), usize::MAX);
+            let records: Vec<_> = store.indices().collect();
+            for index in store.indices() {
+                let name = store.record(index).unwrap().qname();
+                let mut slot = qname_hash(name) as usize & (capacity - 1);
+                while self.names[slot] != usize::MAX {
+                    let other = records[self.names[slot]];
+                    if store.record(other).unwrap().qname() == name {
+                        break;
+                    }
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                if self.names[slot] == usize::MAX {
+                    self.names[slot] = index.as_usize();
+                }
+                self.info[index.as_usize()].group = self.names[slot];
+            }
+        }
         let mut engine = PileupEngine::new(prepared.input, (start..=last).into());
         // Seqair's per-position cap would discard different bases. Whole-read
         // admission above implements the HTSlib cap, so leave this uncapped.
-        let cutoff = self.max_depth - (self.max_depth as f64 * 0.01) as u32;
-        let mut positions = Vec::new();
+        let cutoff = self.counter.max_depth - (self.counter.max_depth as f64 * 0.01) as u32;
         while let Some(column) = engine.pileups() {
             let mut position = PileupPosition::new(name.as_str().into(), column.pos().as_u32());
             position.depth = column.depth() as u32;
             position.near_max_depth = position.depth > cutoff;
-            if let Some(strategy) = self.strategy {
-                active.clear();
+            if let Some(strategy) = self.counter.strategy {
+                self.active.clear();
+                self.links.clear();
                 for (index, alignment) in column.raw_alignments().enumerate() {
-                    let group = info[alignment.record_idx().as_usize()].group;
-                    if groups[group].is_empty() {
-                        active.push(group);
+                    let group = self.info[alignment.record_idx().as_usize()].group;
+                    if self.heads[group] == usize::MAX {
+                        self.active.push(group);
                     }
-                    groups[group].push(index);
+                    self.links.push(self.heads[group]);
+                    self.heads[group] = index;
                 }
                 let alignment = |index| column.alignment_at(index).unwrap().alignment();
-                let passes = |read: &PileupAlignment| info[read.record_idx().as_usize()].passes;
-                for &group in &active {
-                    let reads = &mut groups[group];
+                let passes =
+                    |read: &PileupAlignment| self.info[read.record_idx().as_usize()].passes;
+                for &group in &self.active {
+                    self.members.clear();
+                    let mut current = self.heads[group];
+                    while current != usize::MAX {
+                        self.members.push(current);
+                        current = self.links[current];
+                    }
+                    self.members.reverse();
+                    let reads = &mut self.members;
                     reads.sort_by(|&a, &b| {
                         let (a, b) = (alignment(a), alignment(b));
                         strategy
@@ -136,27 +217,28 @@ impl SeqairCounter {
                         &mut position,
                         best,
                         passes(best),
-                        self.min_base_quality,
+                        self.counter.min_base_quality,
                         base,
                         reads.len() > 1,
                     );
-                    reads.clear();
+                    self.heads[group] = usize::MAX;
                 }
             } else {
                 for read in column.raw_alignments() {
                     update(
                         &mut position,
                         read,
-                        info[read.record_idx().as_usize()].passes,
-                        self.min_base_quality,
+                        self.info[read.record_idx().as_usize()].passes,
+                        self.counter.min_base_quality,
                         None,
                         false,
                     );
                 }
             }
-            positions.push(position);
+            emit(position)?;
         }
-        Ok(positions)
+        self.store = engine.reclaim_allocation().unwrap_or_default();
+        Ok(())
     }
 }
 
@@ -174,9 +256,7 @@ struct Admission {
     ends: BinaryHeap<Reverse<i64>>,
     previous: Option<i64>,
     limit: usize,
-    names: HashMap<Vec<u8>, usize>,
     filter: DefaultReadFilter,
-    group_mates: bool,
 }
 
 impl CustomizeRecordStore for Admission {
@@ -216,22 +296,9 @@ impl CustomizeRecordStore for Admission {
         true
     }
 
-    fn compute(&mut self, read: &SlimRecord, store: &RecordStore<ReadInfo>) -> ReadInfo {
-        let group = if self.group_mates {
-            let name = read.qname(store).expect("Seqair read name");
-            let next = self.names.len();
-            match self.names.get(name) {
-                Some(&group) => group,
-                None => {
-                    self.names.insert(name.to_owned(), next);
-                    next
-                }
-            }
-        } else {
-            0
-        };
+    fn compute(&mut self, read: &SlimRecord, _store: &RecordStore<ReadInfo>) -> ReadInfo {
         ReadInfo {
-            group,
+            group: 0,
             passes: self
                 .filter
                 .filter_fields(read.flags.raw(), read.mapq.as_byte()),
@@ -386,6 +453,7 @@ mod tests {
         let counter = SeqairCounter::open(path, None, filter, strategy, depth, baseq).unwrap();
         let mut reader = bam::IndexedReader::from_path(path).unwrap();
         let header = reader.header().clone();
+        let mut worker = counter.worker().unwrap();
         for (tid, start, stop) in [(0, 0, 64), (0, 5, 18), (1, 0, 64), (0, 5, 18), (1, 8, 8)] {
             reader.fetch((tid, start, stop)).unwrap();
             let mut pileups = reader.pileup();
@@ -405,7 +473,13 @@ mod tests {
                 position.near_max_depth = raw_depth > depth - (depth as f64 * 0.01) as u32;
                 expected.push(position);
             }
-            let actual = counter.count_region(tid, start, stop).unwrap();
+            let mut actual = Vec::new();
+            worker
+                .for_each_position(tid, start, stop, |position| {
+                    actual.push(position);
+                    Ok(())
+                })
+                .unwrap();
             assert_eq!(
                 String::from_utf8(tsv(&actual)).unwrap(),
                 String::from_utf8(tsv(&expected)).unwrap(),

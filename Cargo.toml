@@ -24,7 +24,7 @@ name = "perbase"
 path = "src/main.rs"
 
 [features]
-seqair = ["dep:seqair", "dep:seqair-types"]
+seqair = ["dep:seqair", "dep:seqair-types", "dep:itoa"]
 
 [dependencies]
 anyhow = "1.0.41"
@@ -36,6 +36,7 @@ env_logger = "0.11.8"
 grep-cli = "0.1.5"
 gzp = "2.0"
 itertools = "0.14.0"
+itoa = { version = "1.0", optional = true }
 lazy_static = "1.4.0"
 log = "0.4.11"
 lru_time_cache = "0.11.1"

@@ -1423,6 +1423,7 @@ dependencies = [
  "grep-cli",
  "gzp",
  "itertools 0.14.0",
+ "itoa",
  "lazy_static",
  "log",
  "lru_time_cache",

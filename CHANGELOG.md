@@ -4,6 +4,7 @@
 
 - Performance: reuse same-name read groups across pileup positions in `base-depth --mate-fix`.
 - Add an experimental Seqair 0.10.0 backend for `base-depth`, selected with `--seqair` when built with `--features seqair`. HTSlib remains the default. The optional backend requires Rust 1.98.1 or newer.
+- Performance: stream Seqair results as bounded, ordered TSV blocks formatted by counting workers; reuse worker readers, read storage, and mate-group scratch space instead of retaining output rows or allocating a vector for every read name.
 
 ## 1.4.1
 

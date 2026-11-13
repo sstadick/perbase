@@ -58,8 +58,20 @@ Perbase's filters, mate-resolution strategies, and whole-read maximum-depth
 admission rules. It loads each processed region's reads into memory; memory use
 depends on coverage, region size, and worker count. CRAM input requires
 `--ref-fasta`. Without `--seqair`, HTSlib remains the backend, including in builds
-with this feature. Other subcommands and the output-writing pipeline are
-unchanged. Run the backend comparison tests with
+with this feature. Other subcommands remain unchanged.
+
+With `--seqair`, each worker reuses its reader and read storage, counts a
+position, and immediately formats its TSV row. Bounded queues carry blocks of
+up to 64 KiB to the writer, which drains regions in input order. Workers can
+format ahead without collecting whole regions of output rows. `-C` controls
+the approximate byte-queue budget and number of outstanding regions, with at
+least one 64 KiB block so very small budgets still make progress. It does not
+change region boundaries or limit the memory used to retain reads.
+
+This follows Goose's application pipeline. The libraries are not identical:
+Rust Seqair 0.10.0 still retains auxiliary tags and builds primary-mate links
+that this counter does not use; its public pileup API requires those links.
+Run the backend comparison tests with
 `cargo +1.98.1 test --release --features seqair --locked`.
 
 The output columns are as follows:

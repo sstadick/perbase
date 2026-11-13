@@ -22,6 +22,9 @@ use rust_htslib::bam::Read;
 use std::{convert::TryInto, path::PathBuf};
 use structopt::{StructOpt, clap::AppSettings};
 
+#[cfg(feature = "seqair")]
+mod stream;
+
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
 #[structopt(author, setting = AppSettings::ArgRequiredElseHelp)]
@@ -182,6 +185,22 @@ impl BaseDepth {
             base_processor,
         );
 
+        #[cfg(feature = "seqair")]
+        if self.seqair {
+            let (processor, regions) = par_granges_runner.into_regions()?;
+            let mut output = writer.into_inner().map_err(|error| error.into_error())?;
+            stream::run(
+                &processor,
+                &regions,
+                cpus.saturating_sub(2).max(1),
+                self.chunksize,
+                self.channel_size_modifier,
+                &mut output,
+            )?;
+            output.flush()?;
+            return Ok(());
+        }
+
         let receiver = par_granges_runner.process()?;
 
         for pos in receiver.into_iter() {
@@ -273,7 +292,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
             let header = reader.header().to_owned();
-            let mut count_htslib = || {
+            let result = {
                 // fetch the region of interest
                 reader.fetch((tid, start, stop)).expect("Fetched a region");
                 // Walk over pileups
@@ -313,21 +332,6 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                     })
                     .collect::<Vec<PileupPosition>>()
             };
-            #[cfg(feature = "seqair")]
-            let result = match &self.seqair {
-                Some(counter) => {
-                    let mut positions = counter
-                        .count_region(tid, start, stop)
-                        .expect("Seqair counted the region");
-                    for position in &mut positions {
-                        position.pos += self.coord_base;
-                    }
-                    positions
-                }
-                None => count_htslib(),
-            };
-            #[cfg(not(feature = "seqair"))]
-            let result = count_htslib();
 
             let mut result = if self.keep_zeros {
                 let mut new_result = vec![];
@@ -390,7 +394,12 @@ mod tests {
     ) {
         let dir = tempdir().unwrap();
         let reference = dir.path().join("reference.fa");
-        std::fs::write(&reference, ">chr1\nACGTACGTAA\n>chr2\nTTGCAATGCC\n").unwrap();
+        let second = if format == "bam" {
+            "TTGCAATGC\""
+        } else {
+            "TTGCAATGCC"
+        };
+        std::fs::write(&reference, format!(">chr1\nACGTACGTAA\n>chr2\n{second}\n")).unwrap();
         rust_htslib::faidx::build(&reference).unwrap();
         let mut header = bam::Header::new();
         for name in ["chr1", "chr2"] {
@@ -445,7 +454,17 @@ mod tests {
         if keep_zeros {
             args.push("-k");
         }
-        BaseDepth::from_iter_safe(args).unwrap().run().unwrap();
+        BaseDepth::from_iter_safe(args.clone())
+            .unwrap()
+            .run()
+            .unwrap();
+        #[cfg(feature = "seqair")]
+        {
+            let expected = std::fs::read(&output).unwrap();
+            args.push("--seqair");
+            BaseDepth::from_iter_safe(args).unwrap().run().unwrap();
+            assert_eq!(std::fs::read(&output).unwrap(), expected);
+        }
 
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(b'\t')
@@ -459,7 +478,7 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         let mut expected = vec![];
-        for (name, sequence) in [("chr1", "ACGTACGTAA"), ("chr2", "TTGCAATGCC")] {
+        for (name, sequence) in [("chr1", "ACGTACGTAA"), ("chr2", second)] {
             for (pos, base) in sequence.chars().enumerate() {
                 let expected_depth = u32::from(name == "chr1" && [2, 3, 6, 7].contains(&pos));
                 if keep_zeros || expected_depth > 0 {
@@ -473,6 +492,74 @@ mod tests {
             assert_eq!(row[1].parse::<usize>().unwrap(), pos);
             assert_eq!(&row[ref_base], base.to_string());
             assert_eq!(row[depth].parse::<u32>().unwrap(), expected_depth);
+        }
+    }
+
+    #[cfg(feature = "seqair")]
+    #[test]
+    fn streaming_preserves_regions_and_handles_output_failure() {
+        let dir = tempdir().unwrap();
+        let reads = dir.path().join("reads.bam");
+        let output = dir.path().join("output.tsv");
+        let bed = dir.path().join("regions.bed");
+        let mut header = bam::Header::new();
+        for (name, length) in [("a\"quoted", 30000), ("b", 19)] {
+            header.push_record(
+                bam::header::HeaderRecord::new(b"SQ")
+                    .push_tag(b"SN", name)
+                    .push_tag(b"LN", length),
+            );
+        }
+        let view = bam::HeaderView::from_header(&header);
+        let mut writer = bam::Writer::from_path(&reads, &header, bam::Format::Bam).unwrap();
+        writer
+            .write(
+                &Record::from_sam(&view, b"read\t0\ta\"quoted\t3\t60\t4M\t*\t0\t0\tACGT\tIIII")
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(writer);
+        bam::index::build(&reads, None, bam::index::Type::Bai, 1).unwrap();
+        std::fs::write(
+            &bed,
+            "b\t0\t19\na\"quoted\t0\t20000\na\"quoted\t15000\t25000\na\"quoted\t50\t50\n",
+        )
+        .unwrap();
+        let run = |seqair: bool, budget: &str, target: &std::path::Path| {
+            let mut args = vec![
+                "base-depth",
+                reads.to_str().unwrap(),
+                "-b",
+                bed.to_str().unwrap(),
+                "-M",
+                "-k",
+                "-m",
+                "-D",
+                "1",
+                "-t",
+                "6",
+                "-c",
+                "5000",
+                "-C",
+                budget,
+                "-o",
+                target.to_str().unwrap(),
+            ];
+            if seqair {
+                args.push("--seqair");
+            }
+            BaseDepth::from_iter_safe(args).unwrap().run()
+        };
+        run(false, "0.15", &output).unwrap();
+        let expected = std::fs::read(&output).unwrap();
+        // Multiple blocks per region, duplicate positions, empty regions,
+        // slot reuse, and both single-slot and parallel execution.
+        for budget in ["0", "0.15"] {
+            run(true, budget, &output).unwrap();
+            assert_eq!(std::fs::read(&output).unwrap(), expected);
+        }
+        if std::path::Path::new("/dev/full").exists() {
+            assert!(run(true, "0.15", std::path::Path::new("/dev/full")).is_err());
         }
     }
 
