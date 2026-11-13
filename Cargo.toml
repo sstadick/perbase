@@ -44,8 +44,8 @@ num_cpus = "1.13.0"
 rayon = "1.4.0"
 rust-htslib = {version = "0.51", default-features = false, features = ["libdeflate"]}
 rust-lapper = "1.0"
-seqair = { version = "=0.10.0", path = "../seqair/crates/seqair", optional = true }
-seqair-types = { version = "0.4.1", path = "../seqair/crates/seqair-types", optional = true }
+seqair = { version = "=0.10.0", git = "https://github.com/sstadick/seqair", rev = "6da4be2d59f87c0e076e7cfc8b2f561fe6909396", optional = true }
+seqair-types = { version = "0.4.1", git = "https://github.com/sstadick/seqair", rev = "6da4be2d59f87c0e076e7cfc8b2f561fe6909396", optional = true }
 serde = { version = "1.0.116", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }
 structopt = "0.3.18"

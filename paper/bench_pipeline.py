@@ -27,16 +27,23 @@ def main():
     parser.add_argument("--pipeline", type=Path, required=True)
     parser.add_argument("--fork", type=Path,
                         help="Optional pipeline binary using the lean Seqair fork")
+    parser.add_argument("--extra", action="append", default=[], metavar="LABEL=PATH",
+                        help="Additional Rust --seqair checkpoint; may be repeated")
     parser.add_argument("--goose", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True,
                         help="New directory for timings, logs and results.json")
     args = parser.parse_args()
-    args.output.mkdir(parents=True, exist_ok=False)
     programs = {"optimized rust + seqair": args.baseline.resolve(),
                 "rust + goose pipeline": args.pipeline.resolve()}
     if args.fork:
         programs["rust + goose pipeline + seqair fork"] = args.fork.resolve()
+    for extra in args.extra:
+        label, separator, path = extra.partition("=")
+        if not separator or not label or not path or label in programs or label == "goose v0.1.3":
+            parser.error("--extra requires a unique LABEL=PATH")
+        programs[label] = Path(path).resolve()
     programs["goose v0.1.3"] = args.goose.resolve()
+    args.output.mkdir(parents=True, exist_ok=False)
     report = {"timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "platform": platform.platform(), "affinity": sorted(os.sched_getaffinity(0)),
               "input": str(args.bam.resolve()), "input_sha256": digest(args.bam),
