@@ -1919,8 +1919,6 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 [[package]]
 name = "seqair"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9156bd1bf8c823dd1df8177e3a9bb68c63f7b12e1078670432e2a6a07ff4819a"
 dependencies = [
  "bytemuck",
  "bz2ngrs",
@@ -1943,8 +1941,6 @@ dependencies = [
 [[package]]
 name = "seqair-types"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c927d5656e7e2df15744eefa743f3bd281dd99ac0d131cdde5de2d66ede8d78"
 dependencies = [
  "bytemuck",
  "fearless_simd",

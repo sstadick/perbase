@@ -38,7 +38,7 @@ Earlier stages, two runs each; time and peak RSS are means:
 | Optimized Rust + Seqair | 1.98.1 / default | 27.32 s | 15.68 GiB |
 | Goose v0.1.3 | native CPU | 5.82 s | 5.20 GiB |
 
-Fresh matched-native comparison, two sequential runs each with order reversed
+First matched-native comparison, two sequential runs each with order reversed
 on the second round. Both Rust binaries use Rust 1.98.1, the release profile
 (`opt-level=3`, fat LTO, one codegen unit), and `-C target-cpu=native`.
 Goose v0.1.3 uses `-O3 -march=native`.
@@ -63,7 +63,7 @@ mate links that Goose disables. The remaining runtime gap has not been isolated
 by profiling; it is not a measurement of language overhead alone.
 
 To repeat, build the baseline from `8415130` in a separate worktree and the
-pipeline version from this tree, saving each executable under a distinct name:
+pipeline checkpoint from `cedbe16`, saving each executable under a distinct name:
 
 ```sh
 RUSTFLAGS='-C target-cpu=native' cargo +1.98.1 build --release --features seqair --locked
@@ -75,6 +75,54 @@ python3 paper/bench_pipeline.py /path/to/paper-chr20-full.bam \
 The runner makes two passes, verifies identical output, and retains logs and
 JSON while removing the large TSVs. Do not run compilation or other benchmarks
 concurrently. It uses the existing OS cache, not a cold-cache protocol.
+
+### Seqair fork checkpoint
+
+The next stage, **optimized rust + goose optimizations + seqair fork**, uses
+`sstadick/seqair` branch `perbase-lean-pileup`, commit
+`471a38e735c32bc9e5a1065c45bb362ede735e89`. It starts at upstream
+`seqair-v0.10.0`, not the fork's stale main branch. The fork allows callers to
+omit stored auxiliary tags and skip automatic primary-mate linking; defaults
+remain unchanged. Perbase enables both opt-outs because its counter does not
+read tags and already resolves same-name records itself.
+
+Fresh comparison of native builds, two sequential runs per binary, reversed
+order on the second round, with the same workload and compiler flags above:
+
+| Stage | Elapsed runs | Mean elapsed | Mean peak RSS | Mean CPU time (user + system) |
+| --- | --- | ---: | ---: | ---: |
+| Optimized Rust + Seqair (`8415130`) | 31.69, 32.16 s | 31.93 s | 15.68 GiB | 193.83 s |
+| + Goose application pipeline (`cedbe16`) | 14.19, 14.28 s | 14.24 s | 5.94 GiB | 101.01 s |
+| + Seqair fork | 13.90, 14.04 s | 13.97 s | 5.05 GiB | 97.74 s |
+| Goose v0.1.3 | 5.90, 6.09 s | 6.00 s | 5.20 GiB | 73.73 s |
+
+All eight outputs have the same length and SHA-256 listed above. The fork
+reduces mean peak RSS by 15.1%; elapsed time is only 1.9% lower in this small
+sample. Goose remains 2.33× faster. These two library differences account for
+some memory overhead but little of the runtime gap; attributing the remainder
+requires profiling. This is not a whole-genome paper rerun.
+
+Validation: 134 Perbase tests including its doctest; 137 targeted Seqair tests
+and 51 doctests (13 intentionally ignored); strict Clippy on the changed Seqair
+library and test targets. Another 155 CLI cases matched both the preceding
+Seqair checkpoint and HTSlib, covering all nine mate strategies, BAI/CSI,
+six CRAM encodings, filters, depth caps, references, overlapping regions,
+empty inputs, tiny output queues, and BGZF output.
+
+A separate `CG`-tag CIGAR probe confirmed an existing limitation: Seqair's
+record-store path processes the placeholder CIGAR rather than expanding the
+tag. Both Rust Seqair checkpoints agree but differ from HTSlib on that input.
+The fork changes retention only, not decoding, and does not fix this limitation.
+
+Both repositories are local checkpoints, not published releases. For this
+experiment, Cargo uses the sibling `../seqair` checkout, including its
+`seqair-types` crate. It must be at the fork commit above; Cargo's path dependency
+does not enforce that revision. Once the fork is published, replace these paths
+with a pinned Git dependency before distributing this Perbase branch.
+
+Build this stage with the native command above, then add
+`--fork /path/to/fork-native` to `bench_pipeline.py`. Raw measurements and source
+hashes are under `fork_comparison` in `rust-pipeline-benchmarks.json`.
 
 ## Generate Plots
 

@@ -133,8 +133,8 @@ impl SeqairWorker<'_> {
             &mut self.store,
             &mut self.admission,
         )?;
-        let prepared = std::mem::take(&mut self.store).prepare_for_pileup();
-        let store = prepared.input.store();
+        let input = std::mem::take(&mut self.store).prepare_for_pileup_without_mate_links();
+        let store = input.store();
         self.info.clear();
         self.info.extend(
             store
@@ -167,7 +167,7 @@ impl SeqairWorker<'_> {
                 self.info[index.as_usize()].group = self.names[slot];
             }
         }
-        let mut engine = PileupEngine::new(prepared.input, (start..=last).into());
+        let mut engine = PileupEngine::new(input, (start..=last).into());
         // Seqair's per-position cap would discard different bases. Whole-read
         // admission above implements the HTSlib cap, so leave this uncapped.
         let cutoff = self.counter.max_depth - (self.counter.max_depth as f64 * 0.01) as u32;
@@ -261,6 +261,7 @@ struct Admission {
 
 impl CustomizeRecordStore for Admission {
     type Extra = ReadInfo;
+    const RETAIN_AUXILIARY: bool = false;
 
     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
         if fields.flags.is_unmapped() || fields.tid.is_none() {
