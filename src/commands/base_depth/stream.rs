@@ -135,8 +135,18 @@ fn send_text(
     sender: &Sender<Result<Vec<u8>>>,
     recycled: &Receiver<Vec<u8>>,
     text: &mut Vec<u8>,
+    finish: bool,
 ) -> Result<()> {
-    for block in text.chunks(BLOCK) {
+    // The queue is bounded in messages, not bytes. Sending a tiny row tail
+    // after every full block would consume two slots for roughly one block
+    // of data, halving the intended buffering budget and stalling workers.
+    // Keep that tail for the next rows; only a region's last block is partial.
+    let length = if finish {
+        text.len()
+    } else {
+        text.len() / BLOCK * BLOCK
+    };
+    for block in text[..length].chunks(BLOCK) {
         let mut bytes = if block.len() == BLOCK {
             recycled
                 .try_recv()
@@ -151,7 +161,8 @@ fn send_text(
             .send(Ok(bytes))
             .map_err(|_| anyhow!("output consumer stopped"))?;
     }
-    text.clear();
+    text.copy_within(length.., 0);
+    text.truncate(text.len() - length);
     Ok(())
 }
 
@@ -201,7 +212,7 @@ fn write_region(
         };
         append_row(text, &quoted, pos + processor.coord_base, base, row);
         if text.len() >= BLOCK {
-            send_text(sender, recycled, text)?;
+            send_text(sender, recycled, text, false)?;
         }
         Ok(())
     };
@@ -223,7 +234,7 @@ fn write_region(
             next += 1;
         }
     }
-    send_text(sender, recycled, text)
+    send_text(sender, recycled, text, true)
 }
 
 fn append_row(text: &mut Vec<u8>, name: &[u8], pos: u32, base: Option<char>, row: &PileupPosition) {
