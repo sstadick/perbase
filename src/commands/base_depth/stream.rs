@@ -1,7 +1,7 @@
 //! Count and format in workers; write bounded byte blocks in region order.
-use super::{BaseProcessor, DefaultReadFilter, PileupPosition, Position};
+use super::{BaseProcessor, DefaultReadFilter, PileupPosition};
 use anyhow::{Context, Result, anyhow};
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use perbase_lib::{par_granges::Region, position::seqair::SeqairWorker, utils};
 use rust_htslib::bam::Read;
 use std::{io::Write, panic::AssertUnwindSafe, thread};
@@ -53,11 +53,15 @@ pub(super) fn run(
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..window)
         .map(|_| bounded::<Result<Vec<u8>>>(blocks))
         .unzip();
+    // Keep one spare block per slot. Retaining every written block would keep
+    // completed regions' output allocations alive while later regions run.
+    let (returns, recycled): (Vec<_>, Vec<_>) = (0..window).map(|_| bounded::<Vec<u8>>(1)).unzip();
 
     thread::scope(|scope| {
         for mut worker in states {
             let jobs = jobs_rx.clone();
             let senders = &senders;
+            let recycled = &recycled;
             let names = &names;
             scope.spawn(move || {
                 let mut text = Vec::with_capacity(BLOCK + 256);
@@ -72,6 +76,7 @@ pub(super) fn run(
                             regions[job],
                             names,
                             sender,
+                            &recycled[job % window],
                             &mut text,
                         )
                     }))
@@ -90,7 +95,7 @@ pub(super) fn run(
             let mut started = false;
             for job in 0..regions.len() {
                 loop {
-                    let bytes = receivers[job % window]
+                    let mut bytes = receivers[job % window]
                         .recv()
                         .context("counting worker disconnected")??;
                     if bytes.is_empty() {
@@ -105,6 +110,12 @@ pub(super) fn run(
                         started = true;
                     }
                     output.write_all(&bytes)?;
+                    if bytes.capacity() == BLOCK {
+                        bytes.clear();
+                        // Never block the writer on buffer recycling. Release
+                        // partial blocks and any surplus full-sized blocks.
+                        let _ = returns[job % window].try_send(bytes);
+                    }
                 }
                 if job + window < regions.len() {
                     jobs_tx.send(job + window)?;
@@ -120,10 +131,24 @@ pub(super) fn run(
     })
 }
 
-fn send_text(sender: &Sender<Result<Vec<u8>>>, text: &mut Vec<u8>) -> Result<()> {
+fn send_text(
+    sender: &Sender<Result<Vec<u8>>>,
+    recycled: &Receiver<Vec<u8>>,
+    text: &mut Vec<u8>,
+) -> Result<()> {
     for block in text.chunks(BLOCK) {
+        let mut bytes = if block.len() == BLOCK {
+            recycled
+                .try_recv()
+                .unwrap_or_else(|_| Vec::with_capacity(BLOCK))
+        } else {
+            // A row crossing the block boundary often leaves just a few
+            // bytes. Giving that tail a full block wastes queued memory.
+            Vec::with_capacity(block.len())
+        };
+        bytes.extend_from_slice(block);
         sender
-            .send(Ok(block.to_vec()))
+            .send(Ok(bytes))
             .map_err(|_| anyhow!("output consumer stopped"))?;
     }
     text.clear();
@@ -136,6 +161,7 @@ fn write_region(
     (tid, start, stop): Region,
     names: &[String],
     sender: &Sender<Result<Vec<u8>>>,
+    recycled: &Receiver<Vec<u8>>,
     text: &mut Vec<u8>,
 ) -> Result<()> {
     text.clear();
@@ -158,52 +184,54 @@ fn write_region(
     }
     // Fetch lazily: an empty region without --keep-zeros needs no reference.
     let mut reference = None;
-    let mut emit = |mut row: PileupPosition| -> Result<()> {
-        if let Some(buffer) = &processor.ref_buffer {
+    let mut emit = |pos: u32, row: &PileupPosition| -> Result<()> {
+        let base = if let Some(buffer) = &processor.ref_buffer {
             if reference.is_none() {
                 reference = Some(buffer.seq(name)?);
             }
-            row.ref_base = Some(char::from(
+            Some(char::from(
                 *reference
                     .as_ref()
                     .unwrap()
-                    .get(row.pos as usize)
+                    .get(pos as usize)
                     .context("Input SAM does not match reference")?,
-            ));
-        }
-        row.pos += processor.coord_base;
-        append_row(text, &quoted, &row);
+            ))
+        } else {
+            None
+        };
+        append_row(text, &quoted, pos + processor.coord_base, base, row);
         if text.len() >= BLOCK {
-            send_text(sender, text)?;
+            send_text(sender, recycled, text)?;
         }
         Ok(())
     };
     let mut next = start;
-    worker.for_each_position(tid, start, stop, |row| {
+    let zero = PileupPosition::default();
+    worker.for_each_position_ref(tid, start, stop, |row| {
         if processor.keep_zeros {
             while next < row.pos {
-                emit(PileupPosition::new(name.as_str().into(), next))?;
+                emit(next, &zero)?;
                 next += 1;
             }
         }
         next = row.pos + 1;
-        emit(row)
+        emit(row.pos, row)
     })?;
     if processor.keep_zeros {
         while next < stop {
-            emit(PileupPosition::new(name.as_str().into(), next))?;
+            emit(next, &zero)?;
             next += 1;
         }
     }
-    send_text(sender, text)
+    send_text(sender, recycled, text)
 }
 
-fn append_row(text: &mut Vec<u8>, name: &[u8], row: &PileupPosition) {
+fn append_row(text: &mut Vec<u8>, name: &[u8], pos: u32, base: Option<char>, row: &PileupPosition) {
     let mut number = itoa::Buffer::new();
     text.extend_from_slice(name);
     text.push(b'\t');
-    text.extend_from_slice(number.format(row.pos).as_bytes());
-    if let Some(base) = row.ref_base {
+    text.extend_from_slice(number.format(pos).as_bytes());
+    if let Some(base) = base {
         text.push(b'\t');
         match base {
             '"' => text.extend_from_slice(b"\"\"\"\""),

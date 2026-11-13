@@ -15,7 +15,7 @@ use super::mate_fix::{Base, MateResolutionStrategy};
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
 // There is no reason to go bigger, for now at least
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct PileupPosition {
     /// Reference sequence name.

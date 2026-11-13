@@ -502,6 +502,17 @@ mod tests {
         let reads = dir.path().join("reads.bam");
         let output = dir.path().join("output.tsv");
         let bed = dir.path().join("regions.bed");
+        let reference = dir.path().join("reference.fa");
+        std::fs::write(
+            &reference,
+            format!(
+                ">a\"quoted\n{}\n>b\n{}\n",
+                "acgTN".repeat(6000),
+                "G".repeat(19)
+            ),
+        )
+        .unwrap();
+        rust_htslib::faidx::build(&reference).unwrap();
         let mut header = bam::Header::new();
         for (name, length) in [("a\"quoted", 30000), ("b", 19)] {
             header.push_record(
@@ -525,7 +536,7 @@ mod tests {
             "b\t0\t19\na\"quoted\t0\t20000\na\"quoted\t15000\t25000\na\"quoted\t50\t50\n",
         )
         .unwrap();
-        let run = |seqair: bool, budget: &str, target: &std::path::Path| {
+        let run = |seqair: bool, budget: &str, target: &std::path::Path, with_reference: bool| {
             let mut args = vec![
                 "base-depth",
                 reads.to_str().unwrap(),
@@ -548,18 +559,31 @@ mod tests {
             if seqair {
                 args.push("--seqair");
             }
+            if with_reference {
+                args.extend(["-r", reference.to_str().unwrap()]);
+            }
             BaseDepth::from_iter_safe(args).unwrap().run()
         };
-        run(false, "0.15", &output).unwrap();
-        let expected = std::fs::read(&output).unwrap();
         // Multiple blocks per region, duplicate positions, empty regions,
         // slot reuse, and both single-slot and parallel execution.
-        for budget in ["0", "0.15"] {
-            run(true, budget, &output).unwrap();
-            assert_eq!(std::fs::read(&output).unwrap(), expected);
-        }
-        if std::path::Path::new("/dev/full").exists() {
-            assert!(run(true, "0.15", std::path::Path::new("/dev/full")).is_err());
+        for with_reference in [false, true] {
+            run(false, "0.15", &output, with_reference).unwrap();
+            let expected = std::fs::read(&output).unwrap();
+            for budget in ["0", "0.15"] {
+                run(true, budget, &output, with_reference).unwrap();
+                assert_eq!(std::fs::read(&output).unwrap(), expected);
+                if std::path::Path::new("/dev/full").exists() {
+                    assert!(
+                        run(
+                            true,
+                            budget,
+                            std::path::Path::new("/dev/full"),
+                            with_reference
+                        )
+                        .is_err()
+                    );
+                }
+            }
         }
     }
 
