@@ -1,5 +1,5 @@
 //! Count and format in workers; write bounded byte blocks in region order.
-use super::{BaseProcessor, DefaultReadFilter, PileupPosition};
+use super::{BaseProcessor, DefaultReadFilter, MateCounter, PileupPosition};
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use perbase_lib::{par_granges::Region, position::seqair::SeqairWorker, utils};
@@ -42,12 +42,14 @@ pub(super) fn run(
         .max(1)
         .min(regions.len());
     let blocks = ((budget / window as f64).min(estimate) as usize / BLOCK).max(1);
-    let counter = processor
-        .seqair
-        .as_ref()
-        .expect("Seqair streaming processor");
     let states = (0..window)
-        .map(|_| counter.worker())
+        .map(|_| {
+            processor
+                .seqair
+                .as_ref()
+                .map(|counter| counter.worker())
+                .transpose()
+        })
         .collect::<Result<Vec<_>>>()?;
     let (jobs_tx, jobs_rx) = bounded::<usize>(window);
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..window)
@@ -168,7 +170,7 @@ fn send_text(
 
 fn write_region(
     processor: &BaseProcessor<DefaultReadFilter>,
-    worker: &mut SeqairWorker<'_>,
+    worker: &mut Option<SeqairWorker<'_>>,
     (tid, start, stop): Region,
     names: &[String],
     sender: &Sender<Result<Vec<u8>>>,
@@ -218,7 +220,7 @@ fn write_region(
     };
     let mut next = start;
     let zero = PileupPosition::default();
-    worker.for_each_position_ref(tid, start, stop, |row| {
+    let mut count_row = |row: &PileupPosition| {
         if processor.keep_zeros {
             while next < row.pos {
                 emit(next, &zero)?;
@@ -227,7 +229,51 @@ fn write_region(
         }
         next = row.pos + 1;
         emit(row.pos, row)
-    })?;
+    };
+    if let Some(worker) = worker {
+        worker.for_each_position_ref(tid, start, stop, &mut count_row)?;
+    } else if start < stop {
+        // Use the same scheduling, formatting, and output buffers for both
+        // backends. Only reading, pileup generation, and counting differ.
+        utils::with_indexed_reader(
+            &processor.reads,
+            processor.ref_fasta.as_deref(),
+            |reader| -> Result<()> {
+                let header = reader.header().to_owned();
+                reader.fetch((tid, start, stop))?;
+                let mut pileups = reader.pileup();
+                pileups.set_max_depth(processor.max_depth.min(i32::MAX as u32));
+                // Name groups must not accumulate across an entire genome.
+                let mut mates = MateCounter::default();
+                for pileup in pileups {
+                    let pileup = pileup?;
+                    if pileup.pos() < start || pileup.pos() >= stop {
+                        continue;
+                    }
+                    let depth = pileup.depth();
+                    let mut row = if processor.mate_fix {
+                        mates.count(
+                            pileup,
+                            &header,
+                            &processor.read_filter,
+                            processor.min_base_quality_score,
+                            processor.mate_fix_strategy,
+                        )
+                    } else {
+                        PileupPosition::from_pileup(
+                            pileup,
+                            &header,
+                            &processor.read_filter,
+                            processor.min_base_quality_score,
+                        )
+                    };
+                    row.near_max_depth = depth > processor.max_depth_warnings_cutoff;
+                    count_row(&row)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
     if processor.keep_zeros {
         while next < stop {
             emit(next, &zero)?;

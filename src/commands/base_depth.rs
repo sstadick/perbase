@@ -133,7 +133,7 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(
+        let writer = utils::get_writer(
             &self.output,
             self.bgzip,
             true,
@@ -186,7 +186,7 @@ impl BaseDepth {
         );
 
         #[cfg(feature = "seqair")]
-        if self.seqair {
+        {
             let (processor, regions) = par_granges_runner.into_regions()?;
             let mut output = writer.into_inner().map_err(|error| error.into_error())?;
             stream::run(
@@ -198,17 +198,19 @@ impl BaseDepth {
                 &mut output,
             )?;
             output.flush()?;
-            return Ok(());
+            Ok(())
         }
 
-        let receiver = par_granges_runner.process()?;
-
-        for pos in receiver.into_iter() {
-            writer.serialize(pos)?
+        #[cfg(not(feature = "seqair"))]
+        {
+            let mut writer = writer;
+            let receiver = par_granges_runner.process()?;
+            for pos in receiver.into_iter() {
+                writer.serialize(pos)?
+            }
+            writer.flush()?;
+            Ok(())
         }
-
-        writer.flush()?;
-        Ok(())
     }
 }
 
@@ -570,18 +572,20 @@ mod tests {
             run(false, "0.15", &output, with_reference).unwrap();
             let expected = std::fs::read(&output).unwrap();
             for budget in ["0", "0.15"] {
-                run(true, budget, &output, with_reference).unwrap();
-                assert_eq!(std::fs::read(&output).unwrap(), expected);
-                if std::path::Path::new("/dev/full").exists() {
-                    assert!(
-                        run(
-                            true,
-                            budget,
-                            std::path::Path::new("/dev/full"),
-                            with_reference
-                        )
-                        .is_err()
-                    );
+                for seqair in [false, true] {
+                    run(seqair, budget, &output, with_reference).unwrap();
+                    assert_eq!(std::fs::read(&output).unwrap(), expected);
+                    if std::path::Path::new("/dev/full").exists() {
+                        assert!(
+                            run(
+                                seqair,
+                                budget,
+                                std::path::Path::new("/dev/full"),
+                                with_reference
+                            )
+                            .is_err()
+                        );
+                    }
                 }
             }
         }
