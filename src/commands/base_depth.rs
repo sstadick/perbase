@@ -8,7 +8,11 @@ use bio::io::fasta::IndexedReader;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{Position, mate_fix::MateResolutionStrategy, pileup_position::PileupPosition},
+    position::{
+        Position,
+        mate_fix::MateResolutionStrategy,
+        pileup_position::{MateCounter, PileupPosition},
+    },
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
@@ -246,6 +250,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
             // Walk over pileups
             let mut pileup = reader.pileup();
             pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
+            let mut mate_counter = MateCounter::default();
             let result: Vec<PileupPosition> = pileup
                 .flat_map(|p| {
                     let pileup = p.expect("Extracted a pileup");
@@ -253,7 +258,7 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
                     let pileup_depth = pileup.depth();
                     if pileup.pos() >= start && pileup.pos() < stop {
                         let mut pos = if self.mate_fix {
-                            PileupPosition::from_pileup_mate_aware(
+                            mate_counter.count(
                                 pileup,
                                 &header,
                                 &self.read_filter,
