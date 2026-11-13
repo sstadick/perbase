@@ -6,6 +6,8 @@
 use anyhow::Result;
 use bio::io::fasta::IndexedReader;
 use log::*;
+#[cfg(feature = "seqair")]
+use perbase_lib::position::seqair::SeqairCounter;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
     position::{
@@ -80,6 +82,11 @@ pub struct BaseDepth {
     #[structopt(long, short = "m")]
     mate_fix: bool,
 
+    /// Use the experimental Seqair reader and pileup engine instead of HTSlib.
+    #[cfg(feature = "seqair")]
+    #[structopt(long)]
+    seqair: bool,
+
     /// If `mate_fix` is true, select the method to use for mate fixing.
     #[structopt(long, default_value = "original")]
     mate_resolution_strategy: MateResolutionStrategy,
@@ -146,6 +153,23 @@ impl BaseDepth {
             self.min_base_quality_score,
         );
 
+        #[cfg(feature = "seqair")]
+        let base_processor = BaseProcessor {
+            seqair: if self.seqair {
+                Some(SeqairCounter::open(
+                    &self.reads,
+                    self.ref_fasta.as_deref(),
+                    read_filter,
+                    self.mate_fix.then_some(self.mate_resolution_strategy),
+                    self.max_depth,
+                    self.min_base_quality_score,
+                )?)
+            } else {
+                None
+            },
+            ..base_processor
+        };
+
         let par_granges_runner = par_granges::ParGranges::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
@@ -193,6 +217,8 @@ struct BaseProcessor<F: ReadFilter> {
     max_depth_warnings_cutoff: u32,
     /// an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
     min_base_quality_score: Option<u8>,
+    #[cfg(feature = "seqair")]
+    seqair: Option<SeqairCounter>,
 }
 
 impl<F: ReadFilter> BaseProcessor<F> {
@@ -229,6 +255,8 @@ impl<F: ReadFilter> BaseProcessor<F> {
             // Set cutoff to 1% of whatever max_depth is.
             max_depth_warnings_cutoff: max_depth - (max_depth as f64 * 0.01) as u32,
             min_base_quality_score,
+            #[cfg(feature = "seqair")]
+            seqair: None,
         }
     }
 }
@@ -245,44 +273,61 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
             let header = reader.header().to_owned();
-            // fetch the region of interest
-            reader.fetch((tid, start, stop)).expect("Fetched a region");
-            // Walk over pileups
-            let mut pileup = reader.pileup();
-            pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
-            let mut mate_counter = MateCounter::default();
-            let result: Vec<PileupPosition> = pileup
-                .flat_map(|p| {
-                    let pileup = p.expect("Extracted a pileup");
-                    // Verify that we are within the bounds of the chunk we are iterating on
-                    let pileup_depth = pileup.depth();
-                    if pileup.pos() >= start && pileup.pos() < stop {
-                        let mut pos = if self.mate_fix {
-                            mate_counter.count(
-                                pileup,
-                                &header,
-                                &self.read_filter,
-                                self.min_base_quality_score,
-                                self.mate_fix_strategy,
-                            )
+            let mut count_htslib = || {
+                // fetch the region of interest
+                reader.fetch((tid, start, stop)).expect("Fetched a region");
+                // Walk over pileups
+                let mut pileup = reader.pileup();
+                pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
+                let mut mate_counter = MateCounter::default();
+                pileup
+                    .flat_map(|p| {
+                        let pileup = p.expect("Extracted a pileup");
+                        // Verify that we are within the bounds of the chunk we are iterating on
+                        let pileup_depth = pileup.depth();
+                        if pileup.pos() >= start && pileup.pos() < stop {
+                            let mut pos = if self.mate_fix {
+                                mate_counter.count(
+                                    pileup,
+                                    &header,
+                                    &self.read_filter,
+                                    self.min_base_quality_score,
+                                    self.mate_fix_strategy,
+                                )
+                            } else {
+                                PileupPosition::from_pileup(
+                                    pileup,
+                                    &header,
+                                    &self.read_filter,
+                                    self.min_base_quality_score,
+                                )
+                            };
+                            if pileup_depth > (self.max_depth_warnings_cutoff) {
+                                pos.near_max_depth = true;
+                            }
+                            pos.pos += self.coord_base;
+                            Some(pos)
                         } else {
-                            PileupPosition::from_pileup(
-                                pileup,
-                                &header,
-                                &self.read_filter,
-                                self.min_base_quality_score,
-                            )
-                        };
-                        if pileup_depth > (self.max_depth_warnings_cutoff) {
-                            pos.near_max_depth = true;
+                            None
                         }
-                        pos.pos += self.coord_base;
-                        Some(pos)
-                    } else {
-                        None
+                    })
+                    .collect::<Vec<PileupPosition>>()
+            };
+            #[cfg(feature = "seqair")]
+            let result = match &self.seqair {
+                Some(counter) => {
+                    let mut positions = counter
+                        .count_region(tid, start, stop)
+                        .expect("Seqair counted the region");
+                    for position in &mut positions {
+                        position.pos += self.coord_base;
                     }
-                })
-                .collect();
+                    positions
+                }
+                None => count_htslib(),
+            };
+            #[cfg(not(feature = "seqair"))]
+            let result = count_htslib();
 
             let mut result = if self.keep_zeros {
                 let mut new_result = vec![];

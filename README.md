@@ -45,6 +45,23 @@ The `base-depth` tool walks over every position in the BAM/CRAM file and calcula
 
 **Note on empty SEQ records:** BAM records with empty SEQ fields (represented as `*` in SAM format) are handled gracefully. These reads still count toward depth, but since the actual nucleotide cannot be determined, they are counted as `N`.
 
+**Experimental Seqair backend:** Build with the optional `seqair` feature using
+Rust 1.98.1 or newer, then pass `--seqair` to `base-depth`:
+
+```bash
+cargo +1.98.1 build --release --features seqair --locked
+./target/release/perbase base-depth reads.bam --seqair --mate-fix --threads 32
+```
+
+This uses Seqair 0.10.0 for indexed reading and pileup generation while retaining
+Perbase's filters, mate-resolution strategies, and whole-read maximum-depth
+admission rules. It loads each processed region's reads into memory; memory use
+depends on coverage, region size, and worker count. CRAM input requires
+`--ref-fasta`. Without `--seqair`, HTSlib remains the backend, including in builds
+with this feature. Other subcommands and the output-writing pipeline are
+unchanged. Run the backend comparison tests with
+`cargo +1.98.1 test --release --features seqair --locked`.
+
 The output columns are as follows:
 
 | Column                    | Description                                                                                        |

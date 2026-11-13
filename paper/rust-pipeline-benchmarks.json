@@ -1,0 +1,284 @@
+{
+  "dataset": "HG00157 chromosome 20; 64,444,167 bp; 15,887,841 mapped records",
+  "input": "/srv/goose-perbase/paper-chr20-full.bam",
+  "workload": "base-depth -m -t 32 -c 1000000; regular uncompressed TSV to a file",
+  "notes": [
+    "Local incremental experiments, not a whole-genome paper rerun.",
+    "Runs are sequential; output SHA-256 is computed outside the timed command.",
+    "The HTSlib control and Seqair swap use the same binary; earlier stages use the recorded older binaries."
+  ],
+  "stages": [
+    {
+      "stage": "original rust",
+      "compiler": "rustc 1.97.1",
+      "runs": [
+        {
+          "variant": "before",
+          "ordinal": 1,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-before",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-1-before.tsv"
+          ],
+          "wall_s": 51.74099985498469,
+          "time_wall_s": 51.73,
+          "user_s": 653.91,
+          "system_s": 24.25,
+          "peak_rss_kib": 11045392,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "8be8a6faa547841faec7ec334427205f20faa470c9395016eb7b70fbc958de04"
+        },
+        {
+          "variant": "before",
+          "ordinal": 4,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-before",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-4-before.tsv"
+          ],
+          "wall_s": 51.951785987010226,
+          "time_wall_s": 51.94,
+          "user_s": 660.44,
+          "system_s": 24.22,
+          "peak_rss_kib": 10747356,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "8be8a6faa547841faec7ec334427205f20faa470c9395016eb7b70fbc958de04"
+        }
+      ]
+    },
+    {
+      "stage": "optimized rust",
+      "compiler": "rustc 1.97.1",
+      "runs": [
+        {
+          "variant": "final",
+          "ordinal": 1,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-final",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-1-final.tsv"
+          ],
+          "wall_s": 33.97538103500847,
+          "time_wall_s": 33.97,
+          "user_s": 271.59,
+          "system_s": 23.25,
+          "peak_rss_kib": 11178112,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d7d51120eaff3a10612fd84a4236b7619fe5da26f2f0c20216dab8721bd7ba9f"
+        },
+        {
+          "variant": "final",
+          "ordinal": 2,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-final",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-2-final.tsv"
+          ],
+          "wall_s": 34.12626875098795,
+          "time_wall_s": 34.12,
+          "user_s": 274.74,
+          "system_s": 23.66,
+          "peak_rss_kib": 11159572,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d7d51120eaff3a10612fd84a4236b7619fe5da26f2f0c20216dab8721bd7ba9f"
+        }
+      ]
+    },
+    {
+      "stage": "goose v0.1.3",
+      "compiler": "Goose release binary",
+      "runs": [
+        {
+          "variant": "goose",
+          "ordinal": 1,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-goose",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-1-goose.tsv"
+          ],
+          "wall_s": 5.76091621897649,
+          "time_wall_s": 5.75,
+          "user_s": 63.58,
+          "system_s": 9.61,
+          "peak_rss_kib": 5455616,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "aa4be436080b5b8949c1e7e3bbf68feaf70b426cef3f717cded6f090e9c50850"
+        },
+        {
+          "variant": "goose",
+          "ordinal": 2,
+          "command": [
+            "/srv/goose-perbase/rust-mate-optimization/perbase-goose",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-mate-optimization/full-2-goose.tsv"
+          ],
+          "wall_s": 5.871124662924558,
+          "time_wall_s": 5.86,
+          "user_s": 64.09,
+          "system_s": 9.73,
+          "peak_rss_kib": 5452544,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "aa4be436080b5b8949c1e7e3bbf68feaf70b426cef3f717cded6f090e9c50850"
+        }
+      ]
+    },
+    {
+      "stage": "optimized rust + htslib control",
+      "compiler": "rustc 1.98.1",
+      "runs": [
+        {
+          "variant": "htslib",
+          "ordinal": 1,
+          "command": [
+            "/srv/goose-perbase/rust-seqair/perbase-candidate",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-seqair/full-1-htslib.tsv"
+          ],
+          "wall_s": 30.723500448977575,
+          "time_wall_s": 30.72,
+          "user_s": 269.05,
+          "system_s": 23.18,
+          "peak_rss_kib": 11163032,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d1e1076acbbabcbdb54a49e8a3a8a8eb3b19fa2972c5c3861f1a4b608e5b0d52"
+        },
+        {
+          "variant": "htslib",
+          "ordinal": 4,
+          "command": [
+            "/srv/goose-perbase/rust-seqair/perbase-candidate",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-seqair/full-4-htslib.tsv"
+          ],
+          "wall_s": 31.131797465030104,
+          "time_wall_s": 31.13,
+          "user_s": 267.92,
+          "system_s": 23.25,
+          "peak_rss_kib": 11174440,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d1e1076acbbabcbdb54a49e8a3a8a8eb3b19fa2972c5c3861f1a4b608e5b0d52"
+        }
+      ]
+    },
+    {
+      "stage": "optimized rust + seqair",
+      "compiler": "rustc 1.98.1",
+      "runs": [
+        {
+          "variant": "seqair",
+          "ordinal": 2,
+          "command": [
+            "/srv/goose-perbase/rust-seqair/perbase-candidate",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-seqair/full-2-seqair.tsv",
+            "--seqair"
+          ],
+          "wall_s": 27.064924979000352,
+          "time_wall_s": 27.06,
+          "user_s": 140.56,
+          "system_s": 48.78,
+          "peak_rss_kib": 16695408,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d1e1076acbbabcbdb54a49e8a3a8a8eb3b19fa2972c5c3861f1a4b608e5b0d52"
+        },
+        {
+          "variant": "seqair",
+          "ordinal": 3,
+          "command": [
+            "/srv/goose-perbase/rust-seqair/perbase-candidate",
+            "base-depth",
+            "/srv/goose-perbase/paper-chr20-full.bam",
+            "-m",
+            "-t",
+            "32",
+            "-c",
+            "1000000",
+            "-o",
+            "/srv/goose-perbase/rust-seqair/full-3-seqair.tsv",
+            "--seqair"
+          ],
+          "wall_s": 27.58064130099956,
+          "time_wall_s": 27.57,
+          "user_s": 140.74,
+          "system_s": 49.35,
+          "peak_rss_kib": 16197808,
+          "output_sha256": "b4e1e41f38b69f5ae99c2a9b5fa652773dde07df41f4467572a6a2bc8de93ed7",
+          "output_bytes": 3627671504,
+          "binary_sha256": "d1e1076acbbabcbdb54a49e8a3a8a8eb3b19fa2972c5c3861f1a4b608e5b0d52"
+        }
+      ]
+    }
+  ]
+}
