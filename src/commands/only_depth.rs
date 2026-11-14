@@ -7,19 +7,15 @@ use anyhow::Result;
 use log::*;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{
-        Position,
-        range_positions::{BedFormatRangePositions, RangePositions},
-    },
+    position::range_positions::RangePositions,
     read_filter::{DefaultReadFilter, ReadFilter},
     utils,
 };
-use rust_htslib::{bam, bam::Read, bam::ext::BamRecordExtensions, bam::record::Cigar};
-use rust_lapper::{Interval, Lapper};
-use smartstring::alias::String;
-use std::{collections::HashMap, path::PathBuf};
-use std::{convert::TryFrom, rc::Rc};
+use rust_htslib::{bam, bam::ext::BamRecordExtensions};
+use std::path::PathBuf;
 use structopt::{StructOpt, clap::AppSettings};
+
+mod stream;
 
 /// Calculate only the depth at each base.
 #[derive(StructOpt)]
@@ -112,6 +108,11 @@ pub struct OnlyDepth {
     /// Output positions as 0-based instead of 1-based.
     #[structopt(long, short = "z")]
     zero_base: bool,
+
+    /// Read alignments with Seqair instead of HTSlib.
+    #[cfg(feature = "seqair")]
+    #[structopt(long)]
+    seqair: bool,
 }
 
 impl OnlyDepth {
@@ -119,7 +120,7 @@ impl OnlyDepth {
         info!("Running only-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(
+        let writer = utils::get_writer(
             &self.output,
             self.bgzip,
             !self.bed_format,
@@ -152,18 +153,23 @@ impl OnlyDepth {
             processor,
         );
 
-        let receiver = par_granges_runner.process()?;
-
-        if self.bed_format {
-            for pos in receiver.into_iter() {
-                writer.serialize(BedFormatRangePositions::from(pos))?
-            }
-        } else {
-            for pos in receiver.into_iter() {
-                writer.serialize(pos)?
-            }
-        }
-        writer.flush()?;
+        let (processor, regions) = par_granges_runner.into_regions()?;
+        let mut output = writer.into_inner().map_err(|error| error.into_error())?;
+        #[cfg(feature = "seqair")]
+        let use_seqair = self.seqair;
+        #[cfg(not(feature = "seqair"))]
+        let use_seqair = false;
+        stream::run(
+            &processor,
+            &regions,
+            cpus.saturating_sub(2).max(1),
+            self.chunksize,
+            self.channel_size_modifier,
+            self.bed_format,
+            use_seqair,
+            &mut output,
+        )?;
+        output.flush()?;
         Ok(())
     }
 
@@ -184,7 +190,7 @@ impl OnlyDepth {
 }
 
 /// Holds the info needed for [par_io::RegionProcessor] implementation
-struct OnlyDepthProcessor<F: ReadFilter> {
+struct OnlyDepthProcessor {
     /// path to indexed BAM/CRAM
     reads: PathBuf,
     /// path to indexed ref file
@@ -198,12 +204,12 @@ struct OnlyDepthProcessor<F: ReadFilter> {
     /// Indicate whether or not to keep positions with 0 depth
     keep_zeros: bool,
     /// implementation of [position::ReadFilter] that will be used
-    read_filter: F,
+    read_filter: DefaultReadFilter,
     /// 0-based or 1-based coordinate output
     coord_base: u32,
 }
 
-impl<F: ReadFilter> OnlyDepthProcessor<F> {
+impl OnlyDepthProcessor {
     /// Create a new OnlyDepthProcessor
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -214,7 +220,7 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
         no_merge: bool,
         keep_zeros: bool,
         coord_base: u32,
-        read_filter: F,
+        read_filter: DefaultReadFilter,
     ) -> Self {
         Self {
             reads,
@@ -227,293 +233,15 @@ impl<F: ReadFilter> OnlyDepthProcessor<F> {
             read_filter,
         }
     }
-
-    /// Sum the counts within the region to get the depths at each RangePosition
-    #[inline]
-    fn sum_counter(
-        &self,
-        counter: Vec<i32>,
-        contig: &str,
-        region_start: u32,
-        region_stop: u32,
-    ) -> Vec<RangePositions> {
-        if self.no_merge {
-            let mut sum: i32 = 0;
-            let mut results = vec![];
-            for (i, count) in counter.iter().enumerate() {
-                sum += count;
-                if sum != 0 || self.keep_zeros {
-                    let mut pos = RangePositions::new(
-                        String::from(contig),
-                        region_start + i as u32 + self.coord_base,
-                    );
-                    pos.depth = u32::try_from(sum).expect("All depths are positive");
-                    pos.end = region_start + i as u32 + self.coord_base + 1;
-                    results.push(pos);
-                }
-            }
-            results
-        } else {
-            // Sum the counter and merge same-depth ranges of positions
-            let mut sum: i32 = 0;
-            let mut results = vec![];
-            let mut curr_start = region_start;
-            let mut curr_depth = counter[0];
-            for (i, count) in counter.iter().enumerate() {
-                sum += count;
-                // freeze pos and start new one
-                if curr_depth != sum {
-                    let mut pos =
-                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
-                    pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
-                    pos.end = region_start + i as u32 + self.coord_base;
-
-                    curr_start = region_start + i as u32;
-                    curr_depth = sum;
-                    results.push(pos);
-                }
-
-                if i == counter.len() - 1 {
-                    // We've hit the end
-                    let mut pos =
-                        RangePositions::new(String::from(contig), curr_start + self.coord_base);
-                    pos.depth = u32::try_from(curr_depth).expect("All depths are positive");
-                    pos.end = region_stop + self.coord_base;
-                    results.push(pos);
-                }
-            }
-            results
-        }
-    }
-
-    /// Process a region, taking into account REF_SKIPs and mates
-    fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
-            let header = reader.header().to_owned();
-            // fetch the region of interest
-            reader.fetch((tid, start, stop)).expect("Fetched a region");
-
-            let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-            let mut maties = HashMap::new();
-
-            // Walk over each read, counting the starts and ends
-            for record in reader
-                .rc_records()
-                .map(|r| r.expect("Read record"))
-                .filter(|read| self.read_filter.filter_read(read, None))
-                .flat_map(|record| IterAlignedBlocks::new(record, self.mate_fix))
-            {
-                let rec_start = u32::try_from(record.0).expect("check overflow");
-                let rec_stop = u32::try_from(record.1).expect("check overflow");
-
-                // NB: since we are splitting the region, it's possible the region we are looking at
-                // may occur before the ROI, or after the ROI
-                if rec_start >= stop || rec_stop <= start {
-                    continue;
-                }
-
-                // rectify start / stop with region boundaries
-                // increment the start of the region
-                let adjusted_start = if rec_start < start {
-                    0
-                } else {
-                    (rec_start - start) as usize
-                };
-
-                let mut dont_count_stop = false; // if this interval extends past the end of the region, don't count an end for it
-                let adjusted_stop = if rec_stop >= stop {
-                    dont_count_stop = true;
-                    counter.len() - 1
-                } else {
-                    (rec_stop - start) as usize
-                };
-
-                // check if this read has a mate that will be seen within this region
-                // that this works for both mates in pair
-                if self.mate_fix && record.2 {
-                    // TODO: figure out better way of passing qname around, get rid of Lazy
-                    // let qname = String::from(std::str::from_utf8(record.3).expect("Convert qname"));
-                    let intervals = maties.entry(record.3).or_insert(vec![]);
-                    intervals.push(Interval {
-                        start: adjusted_start,
-                        stop: adjusted_stop,
-                        val: dont_count_stop,
-                    });
-                } else {
-                    counter[adjusted_start] += 1;
-                    if !dont_count_stop {
-                        // check if the end of interval extended past region end
-                        counter[adjusted_stop] -= 1;
-                    }
-                }
-            }
-
-            if self.mate_fix {
-                // check maties
-                for (_qname, ivs) in maties.drain() {
-                    let mut lapper = Lapper::new(ivs);
-                    lapper.merge_overlaps();
-                    for iv in lapper.intervals {
-                        counter[iv.start] += 1;
-                        if !iv.val {
-                            // check if the end of interval extended past region end
-                            counter[iv.stop] -= 1;
-                        }
-                    }
-                }
-            }
-
-            // Sum the counter and merge same-depth ranges of positions
-            let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-            self.sum_counter(counter, contig, start, stop)
-        })
-    }
-
-    fn process_region_fast(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
-            let header = reader.header().to_owned();
-            // fetch the region of interest
-            reader.fetch((tid, start, stop)).expect("Fetched a region");
-
-            let mut counter: Vec<i32> = vec![0; (stop - start) as usize];
-            let mut maties = HashMap::new();
-
-            // Walk over each read, counting the starts and ends
-            for record in reader
-                .rc_records()
-                .map(|r| r.expect("Read record"))
-                .filter(|read| self.read_filter.filter_read(read, None))
-            {
-                let rec_start = u32::try_from(record.reference_start()).expect("check overflow");
-                let rec_stop = u32::try_from(record.reference_end()).expect("check overflow");
-
-                // rectify start / stop with region boundaries
-                // NB: impossible for rec_start > start since this is from fetch and we aren't splitting bam
-                let adjusted_start = if rec_start < start {
-                    0
-                } else {
-                    (rec_start - start) as usize
-                };
-
-                let mut dont_count_stop = false; // set this flag if this interval extends past the end of our region
-                let adjusted_stop = if rec_stop >= stop {
-                    dont_count_stop = true;
-                    counter.len() - 1
-                } else {
-                    (rec_stop - start) as usize
-                };
-
-                // check if this read has a mate that will be seen within this region
-                if self.mate_fix && OnlyDepth::maybe_overlaps_mate(&record) {
-                    let qname =
-                        String::from(std::str::from_utf8(record.qname()).expect("Convert qname"));
-                    let intervals = maties.entry(qname).or_insert(vec![]);
-                    intervals.push(Interval {
-                        start: adjusted_start,
-                        stop: adjusted_stop,
-                        val: dont_count_stop,
-                    });
-                } else {
-                    counter[adjusted_start] += 1;
-                    // Check if end of interval extended past region end
-                    if !dont_count_stop {
-                        counter[adjusted_stop] -= 1;
-                    }
-                }
-            }
-
-            if self.mate_fix {
-                // check maties
-                for (_qname, ivs) in maties.drain() {
-                    let mut lapper = Lapper::new(ivs);
-                    lapper.merge_overlaps();
-                    for iv in lapper.intervals {
-                        counter[iv.start] += 1;
-                        // Check if end of interval extended past region end
-                        if !iv.val {
-                            counter[iv.stop] -= 1;
-                        }
-                    }
-                }
-            }
-
-            // Sum the counter and merge same-depth ranges of positions
-            let contig = std::str::from_utf8(header.tid2name(tid)).unwrap();
-            self.sum_counter(counter, contig, start, stop)
-        })
-    }
 }
 
-/// Implement [par_io::RegionProcessor] for [SimpleProcessor]
-impl<F: ReadFilter> RegionProcessor for OnlyDepthProcessor<F> {
-    /// Objects of [position::Position] will be returned by each call to [SimpleProcessor::process_region]
+/// Collect rows for callers of the generic region-processing interface.
+/// The CLI uses the same counter but writes each row immediately.
+impl RegionProcessor for OnlyDepthProcessor {
     type P = RangePositions;
 
-    /// Process a region by fetching it from a BAM/CRAM, getting a pileup, and then
-    /// walking the pileup (checking bounds) to create Position objects according to
-    /// the defined filters
     fn process_region(&self, tid: u32, start: u32, stop: u32) -> Vec<RangePositions> {
-        trace!("Processing region {}(tid):{}-{}", tid, start, stop);
-        if self.fast_mode {
-            self.process_region_fast(tid, start, stop)
-        } else {
-            self.process_region(tid, start, stop)
-        }
-    }
-}
-
-// A tweaked impl of IterAlignedBlocks from [here](https://github.com/rust-bio/rust-htslib/blob/9175d3ca186baef4f84a7d7ccb27869b43471e36/src/bam/ext.rs#L51)
-// Not that this will also hang onto the bam::Record and supplies the qname for each thing returned.
-// At the end of the day this shouldn't be the worst since any given read should not have that many splits in it
-struct IterAlignedBlocks {
-    pos: i64,
-    cigar_index: usize,
-    cigar: bam::record::CigarStringView,
-    overlap_status: bool,
-    record: Rc<bam::Record>,
-}
-impl IterAlignedBlocks {
-    fn new(record: Rc<bam::Record>, check_mate: bool) -> Self {
-        let overlap = if check_mate {
-            OnlyDepth::maybe_overlaps_mate(&record)
-        } else {
-            false
-        };
-        Self {
-            pos: record.reference_start(),
-            cigar_index: 0,
-            cigar: record.cigar(),
-            overlap_status: overlap,
-            record,
-        }
-    }
-}
-
-impl Iterator for IterAlignedBlocks {
-    type Item = (i64, i64, bool, String);
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Del(len) => {
-                    let out_pos = self.pos;
-                    self.pos += len as i64;
-                    self.cigar_index += 1;
-                    return Some((
-                        out_pos,
-                        out_pos + len as i64,
-                        self.overlap_status,
-                        String::from(
-                            std::str::from_utf8(self.record.qname()).expect("Convert qname"),
-                        ),
-                    ));
-                }
-                Cigar::RefSkip(len) => self.pos += len as i64,
-                _ => (),
-            }
-            self.cigar_index += 1;
-        }
-        None
+        stream::collect(self, (tid, start, stop)).expect("count region")
     }
 }
 
@@ -530,6 +258,83 @@ mod tests {
     use smartstring::alias::*;
     use std::{collections::HashMap, path::PathBuf};
     use tempfile::{TempDir, tempdir};
+
+    #[test]
+    fn streaming_depth_matches_cigar_coverage() {
+        let directory = tempdir().unwrap();
+        let reads = directory.path().join("reads.bam");
+        let output = directory.path().join("depth.tsv");
+        let mut header = bam::Header::new();
+        header.push_record(
+            bam::header::HeaderRecord::new(b"SQ")
+                .push_tag(b"SN", "a")
+                .push_tag(b"LN", 12),
+        );
+        let view = bam::HeaderView::from_header(&header);
+        let mut writer = bam::Writer::from_path(&reads, &header, bam::Format::Bam).unwrap();
+        for sam in [
+            "pair\t65\ta\t1\t60\t4M3N4M\t=\t3\t11\tAAAAAAAA\tIIIIIIII",
+            "pair\t129\ta\t3\t60\t6M\t=\t1\t-11\tAAAAAA\tIIIIII",
+            "filtered\t512\ta\t4\t60\t2M\t*\t0\t0\tAA\tII",
+            "single\t0\ta\t6\t60\t2M2D2M\t*\t0\t0\tAAAA\tIIII",
+        ] {
+            writer
+                .write(&Record::from_sam(&view, sam.as_bytes()).unwrap())
+                .unwrap();
+        }
+        drop(writer);
+        bam::index::build(&reads, None, bam::index::Type::Bai, 1).unwrap();
+        for (mode, depths) in [
+            (None, [1, 1, 2, 2, 1, 2, 2, 3, 2, 2, 2, 0]),
+            (Some("-m"), [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 0]),
+            (Some("-x"), [1, 1, 2, 2, 2, 3, 3, 3, 2, 2, 2, 0]),
+        ] {
+            for bed in [false, true] {
+                for seqair in [false, cfg!(feature = "seqair")] {
+                    let mut args = vec![
+                        "only-depth",
+                        reads.to_str().unwrap(),
+                        "-n",
+                        "-k",
+                        "-z",
+                        "-F",
+                        "512",
+                        "-c",
+                        "12",
+                        "-t",
+                        "4",
+                        "-o",
+                        output.to_str().unwrap(),
+                    ];
+                    args.extend(mode);
+                    if bed {
+                        args.push("--bed-format");
+                    }
+                    if seqair {
+                        args.push("--seqair");
+                    }
+                    OnlyDepth::from_iter_safe(args).unwrap().run().unwrap();
+                    let mut expected = if bed {
+                        std::string::String::new()
+                    } else {
+                        "REF\tPOS\tEND\tDEPTH\n".to_owned()
+                    };
+                    for (pos, depth) in depths.iter().enumerate() {
+                        expected.push_str(&format!(
+                            "a\t{pos}\t{}\t{}{depth}\n",
+                            pos + 1,
+                            if bed { "\t" } else { "" }
+                        ));
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(&output).unwrap(),
+                        expected,
+                        "mode={mode:?}, bed={bed}, seqair={seqair}"
+                    );
+                }
+            }
+        }
+    }
 
     #[fixture]
     fn read_filter() -> DefaultReadFilter {

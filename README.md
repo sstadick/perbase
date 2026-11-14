@@ -45,6 +45,45 @@ The `base-depth` tool walks over every position in the BAM/CRAM file and calcula
 
 **Note on empty SEQ records:** BAM records with empty SEQ fields (represented as `*` in SAM format) are handled gracefully. These reads still count toward depth, but since the actual nucleotide cannot be determined, they are counted as `N`.
 
+**Experimental Seqair backend:** Build with the optional `seqair` feature using
+Rust 1.98.1 or newer, then pass `--seqair` to `base-depth` or `only-depth`:
+
+```bash
+cargo +1.98.1 build --release --features seqair --locked
+./target/release/perbase base-depth reads.bam --seqair --mate-fix --threads 32
+./target/release/perbase only-depth reads.bam --seqair --mate-fix --threads 32
+```
+
+This uses published upstream Seqair 0.10.1 for indexed reading and pileup
+generation while retaining Perbase's filters, mate-resolution strategies, and whole-read maximum-depth
+admission rules. `base-depth` loads each processed region's reads into memory;
+memory use depends on coverage, region size, and worker count. Auxiliary tags
+are not retained. `only-depth` reuses a raw record and a coverage-difference
+array, requesting read names only when fixing mate overlaps. It does not build
+a pileup store or request sequence, quality, or auxiliary fields. CRAM input requires
+`--ref-fasta`. Without `--seqair`, HTSlib remains the backend, including in builds
+with this feature. Other subcommands remain unchanged.
+
+**Long-CIGAR limitation:** Seqair 0.10.1's pileup store does not expand BAM
+`CG` tags. `base-depth --seqair` reports an error for these records instead of
+silently counting their placeholder CIGARs. Rerun without `--seqair` to use
+HTSlib. The Seqair `only-depth` raw-reader path handles these records.
+
+Both depth commands, with either backend, format rows in counting workers and
+send bounded blocks of up to 64 KiB to a writer that drains regions in order.
+Workers reuse readers and scratch allocations instead of retaining output
+rows. `-C` sets the approximate queue budget in GB per worker, with a minimum
+of one 64 KiB queued block per worker. Worker scratch buffers and input storage
+are additional memory. Small queue budgets do not reduce the worker count.
+Region boundaries and output ordering are unchanged.
+
+The safe small-integer formatting and singleton/pair fast paths incorporate
+[Rob's optimization suggestions](https://gist.github.com/rob-p/a5066b01ca6ccecba0bf2eb3998b88b0).
+The application uses ordinary reserved vectors, not unchecked pushes or custom
+allocators. Seqair library optimizations remain a separate follow-up; this
+build does not depend on our experimental fork. Run backend comparison tests with
+`cargo +1.98.1 test --release --features seqair --locked`.
+
 The output columns are as follows:
 
 | Column                    | Description                                                                                        |

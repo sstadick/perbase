@@ -9,6 +9,7 @@ pub trait ReadFilter {
 }
 
 /// A straightforward read filter.
+#[derive(Clone, Copy)]
 pub struct DefaultReadFilter {
     include_flags: u16,
     exclude_flags: u16,
@@ -24,15 +25,19 @@ impl DefaultReadFilter {
             min_mapq,
         }
     }
+
+    /// Apply the SAM flag and mapping-quality filters without an HTSlib record.
+    pub fn filter_fields(&self, flags: u16, mapq: u8) -> bool {
+        (!flags) & self.include_flags == 0
+            && flags & self.exclude_flags == 0
+            && mapq >= self.min_mapq
+    }
 }
 
 impl ReadFilter for DefaultReadFilter {
     /// Filter reads based SAM flags and mapping quality
     #[inline(always)]
     fn filter_read(&self, read: &Record, _alignment: Option<&Alignment>) -> bool {
-        let flags = read.flags();
-        (!flags) & self.include_flags == 0
-            && flags & self.exclude_flags == 0
-            && read.mapq() >= self.min_mapq
+        self.filter_fields(read.flags(), read.mapq())
     }
 }

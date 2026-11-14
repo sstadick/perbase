@@ -23,6 +23,9 @@ path = "src/lib/mod.rs"
 name = "perbase"
 path = "src/main.rs"
 
+[features]
+seqair = ["dep:seqair", "dep:seqair-types"]
+
 [dependencies]
 anyhow = "1.0.41"
 bio = "3.0.0"
@@ -33,6 +36,7 @@ env_logger = "0.11.8"
 grep-cli = "0.1.5"
 gzp = "2.0"
 itertools = "0.14.0"
+itoa = "1.0"
 lazy_static = "1.4.0"
 log = "0.4.11"
 lru_time_cache = "0.11.1"
@@ -40,6 +44,8 @@ num_cpus = "1.13.0"
 rayon = "1.4.0"
 rust-htslib = {version = "0.51", default-features = false, features = ["libdeflate"]}
 rust-lapper = "1.0"
+seqair = { version = "0.10.1", optional = true }
+seqair-types = { version = "0.4.1", optional = true }
 serde = { version = "1.0.116", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }
 structopt = "0.3.18"

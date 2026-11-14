@@ -12,10 +12,16 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["", "seqair"]
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.1"
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --locked --verbose --features "${{ matrix.features }}"
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose --features "${{ matrix.features }}"

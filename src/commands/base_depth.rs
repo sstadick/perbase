@@ -6,15 +6,23 @@
 use anyhow::Result;
 use bio::io::fasta::IndexedReader;
 use log::*;
+#[cfg(feature = "seqair")]
+use perbase_lib::position::seqair::SeqairCounter;
 use perbase_lib::{
     par_granges::{self, RegionProcessor},
-    position::{Position, mate_fix::MateResolutionStrategy, pileup_position::PileupPosition},
+    position::{
+        Position,
+        mate_fix::MateResolutionStrategy,
+        pileup_position::{MateCounter, PileupPosition},
+    },
     read_filter::{DefaultReadFilter, ReadFilter},
     reference, utils,
 };
 use rust_htslib::bam::Read;
 use std::{convert::TryInto, path::PathBuf};
 use structopt::{StructOpt, clap::AppSettings};
+
+mod stream;
 
 /// Calculate the depth at each base, per-nucleotide.
 #[derive(StructOpt)]
@@ -76,6 +84,11 @@ pub struct BaseDepth {
     #[structopt(long, short = "m")]
     mate_fix: bool,
 
+    /// Use the experimental Seqair reader and pileup engine instead of HTSlib.
+    #[cfg(feature = "seqair")]
+    #[structopt(long)]
+    seqair: bool,
+
     /// If `mate_fix` is true, select the method to use for mate fixing.
     #[structopt(long, default_value = "original")]
     mate_resolution_strategy: MateResolutionStrategy,
@@ -119,7 +132,7 @@ impl BaseDepth {
         info!("Running base-depth on: {:?}", self.reads);
         let cpus = utils::determine_allowed_cpus(self.threads)?;
 
-        let mut writer = utils::get_writer(
+        let writer = utils::get_writer(
             &self.output,
             self.bgzip,
             true,
@@ -142,6 +155,23 @@ impl BaseDepth {
             self.min_base_quality_score,
         );
 
+        #[cfg(feature = "seqair")]
+        let base_processor = BaseProcessor {
+            seqair: if self.seqair {
+                Some(SeqairCounter::open(
+                    &self.reads,
+                    self.ref_fasta.as_deref(),
+                    read_filter,
+                    self.mate_fix.then_some(self.mate_resolution_strategy),
+                    self.max_depth,
+                    self.min_base_quality_score,
+                )?)
+            } else {
+                None
+            },
+            ..base_processor
+        };
+
         let par_granges_runner = par_granges::ParGranges::new(
             self.reads.clone(),
             self.ref_fasta.clone(),
@@ -154,13 +184,17 @@ impl BaseDepth {
             base_processor,
         );
 
-        let receiver = par_granges_runner.process()?;
-
-        for pos in receiver.into_iter() {
-            writer.serialize(pos)?
-        }
-
-        writer.flush()?;
+        let (processor, regions) = par_granges_runner.into_regions()?;
+        let mut output = writer.into_inner().map_err(|error| error.into_error())?;
+        stream::run(
+            &processor,
+            &regions,
+            cpus.saturating_sub(2).max(1),
+            self.chunksize,
+            self.channel_size_modifier,
+            &mut output,
+        )?;
+        output.flush()?;
         Ok(())
     }
 }
@@ -189,6 +223,8 @@ struct BaseProcessor<F: ReadFilter> {
     max_depth_warnings_cutoff: u32,
     /// an optional base quality score. If Some(number) if the base quality is not >= that number the base is treated as an `N`
     min_base_quality_score: Option<u8>,
+    #[cfg(feature = "seqair")]
+    seqair: Option<SeqairCounter>,
 }
 
 impl<F: ReadFilter> BaseProcessor<F> {
@@ -225,6 +261,8 @@ impl<F: ReadFilter> BaseProcessor<F> {
             // Set cutoff to 1% of whatever max_depth is.
             max_depth_warnings_cutoff: max_depth - (max_depth as f64 * 0.01) as u32,
             min_base_quality_score,
+            #[cfg(feature = "seqair")]
+            seqair: None,
         }
     }
 }
@@ -241,43 +279,46 @@ impl<F: ReadFilter> RegionProcessor for BaseProcessor<F> {
         trace!("Processing region {}(tid):{}-{}", tid, start, stop);
         utils::with_indexed_reader(&self.reads, self.ref_fasta.as_deref(), |reader| {
             let header = reader.header().to_owned();
-            // fetch the region of interest
-            reader.fetch((tid, start, stop)).expect("Fetched a region");
-            // Walk over pileups
-            let mut pileup = reader.pileup();
-            pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
-            let result: Vec<PileupPosition> = pileup
-                .flat_map(|p| {
-                    let pileup = p.expect("Extracted a pileup");
-                    // Verify that we are within the bounds of the chunk we are iterating on
-                    let pileup_depth = pileup.depth();
-                    if pileup.pos() >= start && pileup.pos() < stop {
-                        let mut pos = if self.mate_fix {
-                            PileupPosition::from_pileup_mate_aware(
-                                pileup,
-                                &header,
-                                &self.read_filter,
-                                self.min_base_quality_score,
-                                self.mate_fix_strategy,
-                            )
+            let result = {
+                // fetch the region of interest
+                reader.fetch((tid, start, stop)).expect("Fetched a region");
+                // Walk over pileups
+                let mut pileup = reader.pileup();
+                pileup.set_max_depth(std::cmp::min(i32::MAX.try_into().unwrap(), self.max_depth));
+                let mut mate_counter = MateCounter::default();
+                pileup
+                    .flat_map(|p| {
+                        let pileup = p.expect("Extracted a pileup");
+                        // Verify that we are within the bounds of the chunk we are iterating on
+                        let pileup_depth = pileup.depth();
+                        if pileup.pos() >= start && pileup.pos() < stop {
+                            let mut pos = if self.mate_fix {
+                                mate_counter.count(
+                                    pileup,
+                                    &header,
+                                    &self.read_filter,
+                                    self.min_base_quality_score,
+                                    self.mate_fix_strategy,
+                                )
+                            } else {
+                                PileupPosition::from_pileup(
+                                    pileup,
+                                    &header,
+                                    &self.read_filter,
+                                    self.min_base_quality_score,
+                                )
+                            };
+                            if pileup_depth > (self.max_depth_warnings_cutoff) {
+                                pos.near_max_depth = true;
+                            }
+                            pos.pos += self.coord_base;
+                            Some(pos)
                         } else {
-                            PileupPosition::from_pileup(
-                                pileup,
-                                &header,
-                                &self.read_filter,
-                                self.min_base_quality_score,
-                            )
-                        };
-                        if pileup_depth > (self.max_depth_warnings_cutoff) {
-                            pos.near_max_depth = true;
+                            None
                         }
-                        pos.pos += self.coord_base;
-                        Some(pos)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                    })
+                    .collect::<Vec<PileupPosition>>()
+            };
 
             let mut result = if self.keep_zeros {
                 let mut new_result = vec![];
@@ -340,7 +381,12 @@ mod tests {
     ) {
         let dir = tempdir().unwrap();
         let reference = dir.path().join("reference.fa");
-        std::fs::write(&reference, ">chr1\nACGTACGTAA\n>chr2\nTTGCAATGCC\n").unwrap();
+        let second = if format == "bam" {
+            "TTGCAATGC\""
+        } else {
+            "TTGCAATGCC"
+        };
+        std::fs::write(&reference, format!(">chr1\nACGTACGTAA\n>chr2\n{second}\n")).unwrap();
         rust_htslib::faidx::build(&reference).unwrap();
         let mut header = bam::Header::new();
         for name in ["chr1", "chr2"] {
@@ -395,7 +441,17 @@ mod tests {
         if keep_zeros {
             args.push("-k");
         }
-        BaseDepth::from_iter_safe(args).unwrap().run().unwrap();
+        BaseDepth::from_iter_safe(args.clone())
+            .unwrap()
+            .run()
+            .unwrap();
+        #[cfg(feature = "seqair")]
+        {
+            let expected = std::fs::read(&output).unwrap();
+            args.push("--seqair");
+            BaseDepth::from_iter_safe(args).unwrap().run().unwrap();
+            assert_eq!(std::fs::read(&output).unwrap(), expected);
+        }
 
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(b'\t')
@@ -409,7 +465,7 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         let mut expected = vec![];
-        for (name, sequence) in [("chr1", "ACGTACGTAA"), ("chr2", "TTGCAATGCC")] {
+        for (name, sequence) in [("chr1", "ACGTACGTAA"), ("chr2", second)] {
             for (pos, base) in sequence.chars().enumerate() {
                 let expected_depth = u32::from(name == "chr1" && [2, 3, 6, 7].contains(&pos));
                 if keep_zeros || expected_depth > 0 {
@@ -423,6 +479,100 @@ mod tests {
             assert_eq!(row[1].parse::<usize>().unwrap(), pos);
             assert_eq!(&row[ref_base], base.to_string());
             assert_eq!(row[depth].parse::<u32>().unwrap(), expected_depth);
+        }
+    }
+
+    #[cfg(feature = "seqair")]
+    #[test]
+    fn streaming_preserves_regions_and_handles_output_failure() {
+        let dir = tempdir().unwrap();
+        let reads = dir.path().join("reads.bam");
+        let output = dir.path().join("output.tsv");
+        let bed = dir.path().join("regions.bed");
+        let reference = dir.path().join("reference.fa");
+        std::fs::write(
+            &reference,
+            format!(
+                ">a\"quoted\n{}\n>b\n{}\n",
+                "acgTN".repeat(6000),
+                "G".repeat(19)
+            ),
+        )
+        .unwrap();
+        rust_htslib::faidx::build(&reference).unwrap();
+        let mut header = bam::Header::new();
+        for (name, length) in [("a\"quoted", 30000), ("b", 19)] {
+            header.push_record(
+                bam::header::HeaderRecord::new(b"SQ")
+                    .push_tag(b"SN", name)
+                    .push_tag(b"LN", length),
+            );
+        }
+        let view = bam::HeaderView::from_header(&header);
+        let mut writer = bam::Writer::from_path(&reads, &header, bam::Format::Bam).unwrap();
+        writer
+            .write(
+                &Record::from_sam(&view, b"read\t0\ta\"quoted\t3\t60\t4M\t*\t0\t0\tACGT\tIIII")
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(writer);
+        bam::index::build(&reads, None, bam::index::Type::Bai, 1).unwrap();
+        std::fs::write(
+            &bed,
+            "b\t0\t19\na\"quoted\t0\t20000\na\"quoted\t15000\t25000\na\"quoted\t50\t50\n",
+        )
+        .unwrap();
+        let run = |seqair: bool, budget: &str, target: &std::path::Path, with_reference: bool| {
+            let mut args = vec![
+                "base-depth",
+                reads.to_str().unwrap(),
+                "-b",
+                bed.to_str().unwrap(),
+                "-M",
+                "-k",
+                "-m",
+                "-D",
+                "1",
+                "-t",
+                "6",
+                "-c",
+                "5000",
+                "-C",
+                budget,
+                "-o",
+                target.to_str().unwrap(),
+            ];
+            if seqair {
+                args.push("--seqair");
+            }
+            if with_reference {
+                args.extend(["-r", reference.to_str().unwrap()]);
+            }
+            BaseDepth::from_iter_safe(args).unwrap().run()
+        };
+        // Multiple blocks per region, duplicate positions, empty regions,
+        // slot reuse, and both single-slot and parallel execution.
+        for with_reference in [false, true] {
+            run(false, "0.15", &output, with_reference).unwrap();
+            let expected = std::fs::read(&output).unwrap();
+            for budget in ["0", "0.15"] {
+                for seqair in [false, true] {
+                    run(seqair, budget, &output, with_reference).unwrap();
+                    assert_eq!(std::fs::read(&output).unwrap(), expected);
+                    if std::path::Path::new("/dev/full").exists() {
+                        assert!(
+                            run(
+                                seqair,
+                                budget,
+                                std::path::Path::new("/dev/full"),
+                                with_reference
+                            )
+                            .is_err()
+                        );
+                    }
+                }
+            }
         }
     }
 

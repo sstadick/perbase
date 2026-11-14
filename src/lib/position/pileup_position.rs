@@ -1,7 +1,6 @@
 //! An implementation of `Position` for dealing with pileups.
 use crate::position::Position;
 use crate::read_filter::ReadFilter;
-use itertools::Itertools;
 use rust_htslib::bam::{
     self, HeaderView,
     pileup::{Alignment, Pileup},
@@ -9,14 +8,14 @@ use rust_htslib::bam::{
 };
 use serde::Serialize;
 use smartstring::{LazyCompact, SmartString, alias::String};
-use std::default;
+use std::{collections::HashMap, default};
 
 use super::mate_fix::{Base, MateResolutionStrategy};
 
 /// Hold all information about a position.
 // NB: The max depth that htslib will return is i32::MAX, and the type of pos for htlib is u32
 // There is no reason to go bigger, for now at least
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct PileupPosition {
     /// Reference sequence name.
@@ -195,6 +194,9 @@ impl PileupPosition {
     /// first in pair that passes filters. In the event of both failing filters or not being first in pair, the first
     /// read encountered is kept.
     ///
+    /// When processing many positions in a region, use [`MateCounter`] to
+    /// reuse read-name groups instead of sorting the names at each position.
+    ///
     /// # Arguments
     ///
     /// * `pileup` - a pileup at a genomic position
@@ -210,56 +212,48 @@ impl PileupPosition {
         mate_fix_strat: MateResolutionStrategy,
     ) -> Self {
         let name = Self::compact_refseq(header, pileup.tid());
-        // make output 1-based
         let mut pos = Self::new(name, pileup.pos());
         pos.depth = pileup.depth();
-
-        // Group records by qname
-        let grouped_by_qname = pileup
+        let mut reads: Vec<_> = pileup
             .alignments()
-            .map(|aln| {
-                let record = aln.record();
-                (aln, record)
+            .map(|alignment| {
+                let record = alignment.record();
+                (alignment, record)
             })
-            .sorted_by(|a, b| Ord::cmp(a.1.qname(), b.1.qname()))
-            // TODO: I'm not sure there is a good way to remove this allocation
-            .chunk_by(|a| a.1.qname().to_owned());
-
-        for (_qname, reads) in grouped_by_qname.into_iter() {
-            let mut total_reads = 0; // count how many reads there were
-
-            let mut reads = reads
-                .inspect(|_| total_reads += 1)
-                .sorted_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
-            let best = &reads.next().unwrap();
-
-            if let Some(second_best) = &reads.next().as_ref() {
-                // Deal explicitly with mate overlap, they are already ordered correctly
-                let result = mate_fix_strat.cmp(best, second_best, read_filter);
-                pos.depth -= total_reads - 1;
-                Self::update(
-                    &mut pos,
-                    &best.0,
-                    &best.1,
-                    read_filter,
-                    base_filter,
-                    result.recommended_base,
-                    true,
-                );
-            } else {
-                pos.depth -= total_reads - 1;
-                Self::update(
-                    &mut pos,
-                    &best.0,
-                    &best.1,
-                    read_filter,
-                    base_filter,
-                    None,
-                    false,
-                );
-            }
+            .collect();
+        reads.sort_by(|a, b| a.1.qname().cmp(b.1.qname()));
+        for group in reads.chunk_by_mut(|a, b| a.1.qname() == b.1.qname()) {
+            pos.update_mate_group(group, read_filter, base_filter, mate_fix_strat);
         }
         pos
+    }
+
+    // Count one group of same-name records. Keep the original stable sort:
+    // some strategies resolve ties by encounter order, including groups with
+    // more than two alignments (for example, secondary alignments).
+    fn update_mate_group<F: ReadFilter>(
+        &mut self,
+        reads: &mut [(Alignment<'_>, Record)],
+        read_filter: &F,
+        base_filter: Option<u8>,
+        mate_fix_strat: MateResolutionStrategy,
+    ) {
+        reads.sort_by(|a, b| mate_fix_strat.cmp(a, b, read_filter).ordering.reverse());
+        let best = &reads[0];
+        let recommended_base = reads.get(1).and_then(|second_best| {
+            mate_fix_strat
+                .cmp(best, second_best, read_filter)
+                .recommended_base
+        });
+        self.depth -= reads.len() as u32 - 1;
+        self.update(
+            &best.0,
+            &best.1,
+            read_filter,
+            base_filter,
+            recommended_base,
+            reads.len() > 1,
+        );
     }
 
     /// Convert a tid to a [`SmartString<LazyCompact>`].
@@ -267,6 +261,84 @@ impl PileupPosition {
     pub fn compact_refseq(header: &HeaderView, tid: u32) -> SmartString<LazyCompact> {
         let name = std::str::from_utf8(header.tid2name(tid)).unwrap();
         String::from(name)
+    }
+}
+
+/// Count bases without counting overlapping same-name reads more than once.
+///
+/// Reuse one counter for the positions in a queried region. It copies each
+/// distinct read name once and reuses the lists that group alignments by name,
+/// instead of sorting names and allocating those lists at every position.
+/// Names remain stored until the counter is dropped, so create a new counter
+/// for each region rather than retaining one for an entire genome.
+#[derive(Default)]
+pub struct MateCounter {
+    names: HashMap<Vec<u8>, usize>,
+    groups: Vec<Vec<usize>>,
+    active_groups: Vec<usize>,
+}
+
+impl MateCounter {
+    /// Count one position using the requested filters and mate strategy.
+    /// Only names and reusable index lists survive the call; BAM records and
+    /// alignments are borrowed from this pileup and are not retained.
+    pub fn count<F: ReadFilter>(
+        &mut self,
+        pileup: Pileup,
+        header: &HeaderView,
+        read_filter: &F,
+        base_filter: Option<u8>,
+        mate_fix_strat: MateResolutionStrategy,
+    ) -> PileupPosition {
+        let name = PileupPosition::compact_refseq(header, pileup.tid());
+        let mut pos = PileupPosition::new(name, pileup.pos());
+        pos.depth = pileup.depth();
+        self.active_groups.clear();
+
+        for (index, alignment) in pileup.alignments().enumerate() {
+            let record = alignment.record();
+            let group = match self.names.get(record.qname()) {
+                Some(&group) => group,
+                None => {
+                    let group = self.groups.len();
+                    self.names.insert(record.qname().to_owned(), group);
+                    self.groups.push(Vec::new());
+                    group
+                }
+            };
+            if self.groups[group].is_empty() {
+                self.active_groups.push(group);
+            }
+            self.groups[group].push(index);
+        }
+
+        // The iterator is backed by a slice, so nth() indexes directly without
+        // walking earlier alignments. Reconstructing a Record here only borrows
+        // its BAM data; it does not copy the sequence or allocate storage.
+        let entry = |index| {
+            let alignment = pileup.alignments().nth(index).unwrap();
+            let record = alignment.record();
+            (alignment, record)
+        };
+        for &group in &self.active_groups {
+            let indices = &mut self.groups[group];
+            match *indices.as_slice() {
+                [index] => {
+                    let (alignment, record) = entry(index);
+                    pos.update(&alignment, &record, read_filter, base_filter, None, false);
+                }
+                [first, second] => {
+                    let mut reads = [entry(first), entry(second)];
+                    pos.update_mate_group(&mut reads, read_filter, base_filter, mate_fix_strat);
+                }
+                _ => {
+                    let mut reads: Vec<_> = indices.iter().map(|&index| entry(index)).collect();
+                    pos.update_mate_group(&mut reads, read_filter, base_filter, mate_fix_strat);
+                }
+            }
+            indices.clear();
+        }
+        pos
     }
 }
 
@@ -310,6 +382,8 @@ mod tests {
                 b"TESTPAIR\t147\tchr1\t15\t40\t10M\tchr1\t10\t30\tCCCCCCCCCC\t##########",
             )
             .unwrap(),
+            // Reuse the name after both mates have left the pileup.
+            Record::from_sam(&view, b"TESTPAIR\t0\tchr1\t40\t20\t3M\t*\t0\t0\tGGG\t###").unwrap(),
         ];
 
         // Write BAM file
@@ -359,6 +433,39 @@ mod tests {
         }
 
         assert!(found_position, "Should have found pileup at position 14");
+
+        // Reusing the counter must handle one read, overlapping mates, the
+        // remaining read, and a later alignment with the same name. Counts
+        // from earlier positions must never leak into a subsequent position.
+        reader.fetch(("chr1", 0, 100)).unwrap();
+        let mut counter = MateCounter::default();
+        let observed: Vec<_> = reader
+            .pileup()
+            .map(|pileup| {
+                let position = counter.count(
+                    pileup.unwrap(),
+                    &header_view,
+                    &read_filter,
+                    None,
+                    MateResolutionStrategy::Original,
+                );
+                (
+                    position.pos,
+                    position.depth,
+                    position.a,
+                    position.c,
+                    position.g,
+                    position.count_of_mate_resolutions,
+                )
+            })
+            .collect();
+        let expected: Vec<_> = (9..14)
+            .map(|pos| (pos, 1, 1, 0, 0, 0))
+            .chain((14..19).map(|pos| (pos, 1, 1, 0, 0, 1)))
+            .chain((19..24).map(|pos| (pos, 1, 0, 1, 0, 0)))
+            .chain((39..42).map(|pos| (pos, 1, 0, 0, 1, 0)))
+            .collect();
+        assert_eq!(observed, expected);
     }
 
     /// Test different MateResolutionStrategy behaviors
