@@ -44,8 +44,9 @@ num_cpus = "1.13.0"
 rayon = "1.4.0"
 rust-htslib = {version = "0.51", default-features = false, features = ["libdeflate"]}
 rust-lapper = "1.0"
-seqair = { version = "0.10.1", optional = true }
-seqair-types = { version = "0.4.1", optional = true }
+# Long-CIGAR fix pending upstream: https://github.com/Softleif/seqair/pull/95.
+seqair = { git = "https://github.com/sstadick/seqair", rev = "3f03efcae08a62754a33d47c6ea1cb0d27f1c3a5", optional = true }
+seqair-types = { git = "https://github.com/sstadick/seqair", rev = "3f03efcae08a62754a33d47c6ea1cb0d27f1c3a5", optional = true }
 serde = { version = "1.0.116", features = ["derive"] }
 smartstring = { version = "1.0.1", features = ["serde"] }
 structopt = "0.3.18"

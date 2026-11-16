@@ -138,17 +138,13 @@ impl SeqairWorker<'_> {
             .target_name(tid)
             .context("unknown Seqair reference")?
             .to_owned();
-        let mut reads = CountingReads::default();
+        let mut reads = CountingReads;
         self.reader.fetch_into_customized(
             tid,
             (start..=last).into(),
             &mut self.store,
             &mut reads,
         )?;
-        anyhow::ensure!(
-            !reads.long_cigar,
-            "Seqair 0.10.1 pileup storage does not support BAM long CIGARs (CG tags); rerun base-depth without --seqair"
-        );
         self.info.clear();
         self.info.extend(self.store.records().map(|read| {
             ReadInfo {
@@ -407,38 +403,13 @@ struct ReadInfo {
 }
 
 #[derive(Clone, Default)]
-struct CountingReads {
-    long_cigar: bool,
-}
+struct CountingReads;
 
 impl CustomizeRecordStore for CountingReads {
     type Extra = ();
 
     fn filter_raw(&mut self, fields: &FilterRawFields<'_>) -> bool {
-        if fields.flags.is_unmapped() || fields.tid.is_none() {
-            return false;
-        }
-        // BAM stores long CIGARs as two placeholder operations and a CG tag.
-        // The upstream raw reader expands them, but RecordStore does not yet.
-        if fields.n_cigar_ops == 2 {
-            let mut ops = fields
-                .cigar
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|bytes| u32::from_le_bytes(*bytes));
-            let first = ops.next().unwrap();
-            let second = ops.next().unwrap();
-            if first & 15 == 4
-                && first >> 4 == fields.seq_len
-                && second & 15 == 3
-                && ::seqair::bam::aux::find_tag(fields.aux_bytes, *b"CG").is_some()
-            {
-                self.long_cigar = true;
-                return false;
-            }
-        }
-        true
+        !fields.flags.is_unmapped() && fields.tid.is_some()
     }
 
     fn compute(&mut self, _: &SlimRecord, _: &RecordStore) {}
@@ -716,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_long_cigars_instead_of_counting_the_placeholder() {
+    fn counts_long_cigars_instead_of_the_placeholder() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("long.bam");
         let mut header = bam::Header::new();
@@ -751,12 +722,20 @@ mod tests {
             None,
         )
         .unwrap();
-        let error = counter.count_region(0, 1, 8).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("rerun base-depth without --seqair")
-        );
+        let actual = counter.count_region(0, 1, 8).unwrap();
+        // Each 1M1I contributes an A match with a following C insertion.
+        // The BAM placeholder would instead describe a reference skip.
+        let expected: Vec<_> = (1..8)
+            .map(|pos| PileupPosition {
+                ref_seq: "a".into(),
+                pos,
+                depth: 1,
+                a: 1,
+                ins: 1,
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(tsv(&actual), tsv(&expected));
     }
 
     #[test]
