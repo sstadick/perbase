@@ -2,6 +2,8 @@
 pub mod mate_fix;
 pub mod pileup_position;
 pub mod range_positions;
+#[cfg(feature = "seqair")]
+pub mod seqair;
 
 use serde::Serialize;
 use smartstring::alias::String;

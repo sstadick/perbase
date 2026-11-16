@@ -24,8 +24,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.1"
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features seqair
+      - name: Check Seqair support
+        run: |
+          target/release/perbase base-depth --help | grep -- --seqair
+          target/release/perbase only-depth --help | grep -- --seqair
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:

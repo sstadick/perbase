@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## Unreleased
+
+- Performance: reuse same-name read groups across pileup positions in `base-depth --mate-fix`.
+- Add an experimental Seqair backend for `base-depth` and `only-depth`, selected with `--seqair` when built with `--features seqair`. HTSlib remains the default. The optional backend requires Rust 1.98.1 or newer and pins the long-CIGAR correctness fix in [upstream Seqair PR #95](https://github.com/Softleif/seqair/pull/95), so both commands handle BAM `CG` tags.
+- Release binaries include the optional Seqair backend; selecting it still requires `--seqair`.
+- Performance: both depth commands stream bounded, ordered TSV blocks formatted by counting workers, with safe small-integer formatting. Reuse readers, coverage arrays, and scratch space rather than retaining output rows. Small queue budgets no longer limit counting concurrency.
+- Performance: `only-depth` reuses one record and merges mate intervals directly instead of building interval-query indexes. Its Seqair path requests only core fields, plus names for mate correction.
+- Credit: incorporate [Rob's singleton/pair, disjoint-name, and formatting suggestions](https://gist.github.com/rob-p/a5066b01ca6ccecba0bf2eb3998b88b0) without unchecked vector writes or the experimental Seqair performance changes.
+
 ## 1.4.1
 
 - Performance: reuse one indexed BAM/CRAM reader per worker thread in `base-depth` and both `only-depth` modes instead of reopening the input for every region ([#110](https://github.com/sstadick/perbase/issues/110)).

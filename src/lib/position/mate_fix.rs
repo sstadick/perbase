@@ -218,6 +218,39 @@ pub enum MateResolutionStrategy {
     Original,
 }
 
+// The observations used by mate resolution, independent of the BAM reader.
+// Base and quality are only requested when both observations have a query
+// position. Keeping these accesses lazy avoids decoding bases for Original.
+pub(crate) trait MateRead {
+    fn flags(&self) -> u16;
+    fn mapq(&self) -> u8;
+    fn qpos(&self) -> Option<usize>;
+    fn base(&self) -> Base;
+    fn base_qual(&self) -> u8;
+}
+
+impl MateRead for (Alignment<'_>, Record) {
+    fn flags(&self) -> u16 {
+        self.1.flags()
+    }
+
+    fn mapq(&self) -> u8 {
+        self.1.mapq()
+    }
+
+    fn qpos(&self) -> Option<usize> {
+        self.0.qpos()
+    }
+
+    fn base(&self) -> Base {
+        Base::from(self.1.seq()[self.0.qpos().unwrap()] as char)
+    }
+
+    fn base_qual(&self) -> u8 {
+        self.1.qual()[self.0.qpos().unwrap()]
+    }
+}
+
 impl MateResolutionStrategy {
     pub(crate) fn cmp<F: ReadFilter>(
         &self,
@@ -228,6 +261,16 @@ impl MateResolutionStrategy {
         // Handle user-set filters.
         let a_pass = read_filter.filter_read(&a.1, Some(&a.0));
         let b_pass = read_filter.filter_read(&b.1, Some(&b.0));
+        self.compare(a, b, a_pass, b_pass)
+    }
+
+    pub(crate) fn compare(
+        &self,
+        a: &impl MateRead,
+        b: &impl MateRead,
+        a_pass: bool,
+        b_pass: bool,
+    ) -> MateResolution {
         if a_pass && !b_pass {
             return MateResolution::new(Ordering::Greater, None);
         } else if b_pass && !a_pass {
@@ -254,48 +297,45 @@ impl MateResolutionStrategy {
     }
 
     pub(crate) fn resolve_base<const DEFAULT_TO_N: bool>(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
+        a: &impl MateRead,
+        b: &impl MateRead,
     ) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
-        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+        let a_base = a.base();
+        let b_base = b.base();
         MateResolution::new(
             Ordering::Greater,
             Some(Base::either_or::<DEFAULT_TO_N>(a_base, b_base)),
         )
     }
 
-    pub(crate) fn base_qual_map_qual_n(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
+    pub(crate) fn base_qual_map_qual_n(a: &impl MateRead, b: &impl MateRead) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
         // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+        let a_qual = a.base_qual();
+        let b_qual = b.base_qual();
 
         match a_qual.cmp(&b_qual) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => match a.1.mapq().cmp(&b.1.mapq()) {
+            Ordering::Equal => match a.mapq().cmp(&b.mapq()) {
                 Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                 Ordering::Less => MateResolution::new(Ordering::Less, None),
                 Ordering::Equal => {
-                    let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                    let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                    let a_base = a.base();
+                    let b_base = b.base();
                     let base = Base::either_or::<true>(a_base, b_base);
                     MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
                 }
@@ -303,30 +343,27 @@ impl MateResolutionStrategy {
         }
     }
 
-    pub(crate) fn base_qual_map_qual_iupac(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
+    pub(crate) fn base_qual_map_qual_iupac(a: &impl MateRead, b: &impl MateRead) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
         // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+        let a_qual = a.base_qual();
+        let b_qual = b.base_qual();
 
         match a_qual.cmp(&b_qual) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
-            Ordering::Equal => match a.1.mapq().cmp(&b.1.mapq()) {
+            Ordering::Equal => match a.mapq().cmp(&b.mapq()) {
                 Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                 Ordering::Less => MateResolution::new(Ordering::Less, None),
                 Ordering::Equal => {
-                    let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                    let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                    let a_base = a.base();
+                    let b_base = b.base();
                     MateResolution::new(
                         Ordering::Greater,
                         Some(Base::either_or::<false>(a_base, b_base)),
@@ -337,19 +374,19 @@ impl MateResolutionStrategy {
     }
 
     pub(crate) fn base_qual_map_qual_first_in_pair(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
+        a: &impl MateRead,
+        b: &impl MateRead,
     ) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
         // compare baseq -> mapq -> default to first in pair
-        let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-        let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+        let a_qual = a.base_qual();
+        let b_qual = b.base_qual();
 
         match a_qual.cmp(&b_qual) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
@@ -358,30 +395,27 @@ impl MateResolutionStrategy {
         }
     }
 
-    pub(crate) fn map_qual_base_qual_n(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
+    pub(crate) fn map_qual_base_qual_n(a: &impl MateRead, b: &impl MateRead) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
-        match a.1.mapq().cmp(&b.1.mapq()) {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
             Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+                let a_qual = a.base_qual();
+                let b_qual = b.base_qual();
 
                 match a_qual.cmp(&b_qual) {
                     Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                     Ordering::Less => MateResolution::new(Ordering::Less, None),
                     Ordering::Equal => {
-                        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                        let a_base = a.base();
+                        let b_base = b.base();
                         let base = Base::either_or::<true>(a_base, b_base);
                         MateResolution::new(Ordering::Greater, Some(base)) // how to pass this back
                     }
@@ -390,30 +424,27 @@ impl MateResolutionStrategy {
         }
     }
 
-    pub(crate) fn map_qual_base_qual_iupac(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
+    pub(crate) fn map_qual_base_qual_iupac(a: &impl MateRead, b: &impl MateRead) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
-        match a.1.mapq().cmp(&b.1.mapq()) {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
             Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+                let a_qual = a.base_qual();
+                let b_qual = b.base_qual();
 
                 match a_qual.cmp(&b_qual) {
                     Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                     Ordering::Less => MateResolution::new(Ordering::Less, None),
                     Ordering::Equal => {
-                        let a_base = Base::from(a.1.seq()[a.0.qpos().unwrap()] as char);
-                        let b_base = Base::from(b.1.seq()[b.0.qpos().unwrap()] as char);
+                        let a_base = a.base();
+                        let b_base = b.base();
                         MateResolution::new(
                             Ordering::Greater,
                             Some(Base::either_or::<false>(a_base, b_base)),
@@ -425,30 +456,30 @@ impl MateResolutionStrategy {
     }
 
     pub(crate) fn map_qual_base_qual_first_in_pair(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
+        a: &impl MateRead,
+        b: &impl MateRead,
     ) -> MateResolution {
         // First check that we have a base
-        let a_is_not_base = a.0.qpos().is_none();
-        let b_is_not_base = b.0.qpos().is_none();
+        let a_is_not_base = a.qpos().is_none();
+        let b_is_not_base = b.qpos().is_none();
         if a_is_not_base || b_is_not_base {
             return Self::original(a, b);
         }
 
-        match a.1.mapq().cmp(&b.1.mapq()) {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
             Ordering::Equal => {
-                let a_qual = a.1.qual()[a.0.qpos().unwrap()];
-                let b_qual = b.1.qual()[b.0.qpos().unwrap()];
+                let a_qual = a.base_qual();
+                let b_qual = b.base_qual();
 
                 match a_qual.cmp(&b_qual) {
                     Ordering::Greater => MateResolution::new(Ordering::Greater, None),
                     Ordering::Less => MateResolution::new(Ordering::Less, None),
                     Ordering::Equal => {
-                        if a.1.flags() & 64 != 0 {
+                        if a.flags() & 64 != 0 {
                             MateResolution::new(Ordering::Greater, None)
-                        } else if b.1.flags() & 64 != 0 {
+                        } else if b.flags() & 64 != 0 {
                             MateResolution::new(Ordering::Less, None)
                         } else {
                             // Default to `a` in the event that there is no first in pair for some reason
@@ -461,18 +492,15 @@ impl MateResolutionStrategy {
     }
 
     /// Whichever has higher MAPQ, or if equal, whichever is first in pair
-    pub(crate) fn original(
-        a: &(Alignment<'_>, Record),
-        b: &(Alignment<'_>, Record),
-    ) -> MateResolution {
-        match a.1.mapq().cmp(&b.1.mapq()) {
+    pub(crate) fn original(a: &impl MateRead, b: &impl MateRead) -> MateResolution {
+        match a.mapq().cmp(&b.mapq()) {
             Ordering::Greater => MateResolution::new(Ordering::Greater, None),
             Ordering::Less => MateResolution::new(Ordering::Less, None),
             Ordering::Equal => {
                 // Check if a is first in pair
-                if a.1.flags() & 64 != 0 {
+                if a.flags() & 64 != 0 {
                     MateResolution::new(Ordering::Greater, None)
-                } else if b.1.flags() & 64 != 0 {
+                } else if b.flags() & 64 != 0 {
                     MateResolution::new(Ordering::Less, None)
                 } else {
                     // Default to `a` in the event that there is no first in pair for some reason

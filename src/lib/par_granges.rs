@@ -25,6 +25,9 @@ pub const CHANNEL_SIZE_MODIFIER: f64 = 0.15;
 /// The ideal number of basepairs each worker will receive. Total bp in memory at one time = `threads` * `chunksize`
 pub const CHUNKSIZE: u32 = 1_000_000;
 
+/// An ordered job: reference ID, zero-based start, and exclusive end.
+pub type Region = (u32, u32, u32);
+
 lazy_static! {
     /// CHANNEL_SIZE_MODIFIER as a str
     pub static ref CHANNEL_SIZE_MODIFIER_STR: String = CHANNEL_SIZE_MODIFIER.to_string();
@@ -156,6 +159,49 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
         Ok(())
     }
 
+    fn input_intervals(&self, header: &HeaderView) -> Result<Vec<Lapper<u32, ()>>> {
+        let bed = self
+            .regions_bed
+            .as_ref()
+            .map(|path| Self::bed_to_intervals(header, path, self.merge_regions))
+            .transpose()?;
+        let bcf = self
+            .regions_bcf
+            .as_ref()
+            .map(|path| Self::bcf_to_intervals(header, path, self.merge_regions))
+            .transpose()?;
+        Ok(match (bed, bcf) {
+            (Some(a), Some(b)) => Self::merge_intervals(a, b, self.merge_regions),
+            (Some(intervals), None) | (None, Some(intervals)) => intervals,
+            (None, None) => Self::header_to_intervals(header, self.chunksize)?,
+        })
+    }
+
+    /// Return the processor and its ordered `(tid, start, stop)` jobs without
+    /// running them. Boundaries match `process`, including overlaps retained
+    /// with merging disabled. A streaming consumer must not subdivide these
+    /// jobs: doing so could change maximum-depth read admission.
+    pub fn into_regions(self) -> Result<(R, Vec<Region>)> {
+        self.validate()?;
+        anyhow::ensure!(self.chunksize > 0, "chunksize must be positive");
+        let reader = IndexedReader::from_path(&self.reads)?;
+        let header = reader.header();
+        let intervals = self.input_intervals(header)?;
+        let width = self.chunksize.saturating_mul(self.threads as u32);
+        let mut jobs = Vec::new();
+        for (tid, intervals) in intervals.iter().enumerate() {
+            let tid = tid as u32;
+            let end: u32 = header.target_len(tid).unwrap().try_into()?;
+            for start in (0..end).step_by(width as usize) {
+                let stop = start.saturating_add(width).min(end);
+                for interval in intervals.find(start, stop) {
+                    jobs.push((tid, interval.start.max(start), interval.stop.min(stop)));
+                }
+            }
+        }
+        Ok((self.processor, jobs))
+    }
+
     /// Process each region.
     ///
     /// This method splits the sequences in the BAM/CRAM header into `chunksize` * `self.threads` regions (aka 'super chunks').
@@ -193,38 +239,9 @@ impl<R: RegionProcessor + Send + Sync> ParGranges<R> {
                 // Get a copy of the header
                 let header = reader.header().to_owned();
 
-                // Work out if we are restricted to a subset of sites
-                let bed_intervals = if let Some(regions_bed) = &self.regions_bed {
-                    Some(
-                        Self::bed_to_intervals(&header, regions_bed, self.merge_regions)
-                            .expect("Parsed BED to intervals"),
-                    )
-                } else {
-                    None
-                };
-                let bcf_intervals = if let Some(regions_bcf) = &self.regions_bcf {
-                    Some(
-                        Self::bcf_to_intervals(&header, regions_bcf, self.merge_regions)
-                            .expect("Parsed BCF/VCF to intervals"),
-                    )
-                } else {
-                    None
-                };
-                let restricted_ivs = match (bed_intervals, bcf_intervals) {
-                    (Some(bed_ivs), Some(bcf_ivs)) => {
-                        Some(Self::merge_intervals(bed_ivs, bcf_ivs, self.merge_regions))
-                    }
-                    (Some(bed_ivs), None) => Some(bed_ivs),
-                    (None, Some(bcf_ivs)) => Some(bcf_ivs),
-                    (None, None) => None,
-                };
-
-                let intervals = if let Some(restricted) = restricted_ivs {
-                    restricted
-                } else {
-                    Self::header_to_intervals(&header, self.chunksize)
-                        .expect("Parsed BAM/CRAM header to intervals")
-                };
+                let intervals = self
+                    .input_intervals(&header)
+                    .expect("Parsed input intervals");
 
                 // The number positions to try to process in one batch
                 let serial_step_size = self.chunksize.saturating_mul(self.threads as u32); // aka superchunk
